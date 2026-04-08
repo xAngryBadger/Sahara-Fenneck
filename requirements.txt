@@ -1,0 +1,32 @@
+﻿# Sahara Fennec - Agente de Planilhas
+# Python 3.11+
+
+# Excel e Windows
+pywin32>=306
+openpyxl>=3.1.0
+pandas>=2.0.0
+
+# LLM local e agente
+ollama
+langchain>=0.1.0
+langchain-ollama>=0.1.0
+
+# Embeddings (RAG opcional)
+sentence-transformers>=2.2.0
+
+# DB e opcional Atlas
+pymongo>=4.0.0
+
+# UI
+customtkinter>=5.2.0
+
+# Utilitarios
+psutil>=5.9.0
+Pillow>=10.0.0
+
+# Drag-and-drop opcional
+# (usado se instalado; o app funciona sem ele)
+tkinterdnd2>=0.4.0
+
+# Build/distribuicao
+pyinstaller>=6.0.0

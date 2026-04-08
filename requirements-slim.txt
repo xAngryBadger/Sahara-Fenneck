@@ -1,0 +1,10 @@
+# Sahara Fennec - dependências mínimas (instalador magro)
+# Python 3.11+ | Sem torch/transformers (app usa Ollama via HTTP)
+
+pywin32>=306
+openpyxl>=3.1.0
+pandas>=2.0.0
+customtkinter>=5.2.0
+psutil>=5.9.0
+Pillow>=10.0.0
+tkinterdnd2>=0.4.0

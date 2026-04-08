@@ -1,0 +1,1 @@
+# Persona configurável (Fennec padrão)
