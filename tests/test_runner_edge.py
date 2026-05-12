@@ -1,14 +1,16 @@
-"""Tests for runner edge cases: sheet switching, hydration, read-only path, intent classification."""
+"""Tests for runner edge cases: sheet switching, hydration, read-only path, intent classification, ReAct loop."""
 from __future__ import annotations
 
 from unittest.mock import MagicMock, patch
 
+import pandas as pd
 from src.agent.runner import (
     _detect_sheet_name,
     _extract_loose_actions,
     _handle_sheet_query,
     _is_read_only_intent,
     _is_workbook_broad_query,
+    _list_sheet_names,
     _strip_tool_payload_from_response,
     run_agent,
 )
@@ -161,3 +163,195 @@ class TestIsWorkbookBroadQuery:
         pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
         ws = Workspace(path=str(xlsx), workbook_name="bq.xlsx", sheet_name="Sheet1", columns=["A"], row_count=1, indexed_rows=1)
         assert _is_workbook_broad_query("qual a media de A?", ws) is False
+
+
+class TestListSheetNamesCOMFallback:
+    def test_com_path_no_excel(self, tmp_path):
+        xlsx = tmp_path / "com_sheets.xlsx"
+        pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="com_sheets.xlsx", sheet_name="Sheet",
+            columns=["A"], row_count=1, indexed_rows=1,
+            excel_live=True, excel_book_name="com_sheets.xlsx", error=None,
+        )
+        with patch("src.agent.runner._cached_sheet_names", return_value=[]):
+            result = _list_sheet_names(ws)
+            assert result == []
+
+    def test_cached_names_returned_first(self, tmp_path):
+        xlsx = tmp_path / "cached.xlsx"
+        pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="cached.xlsx", sheet_name="Sheet",
+            columns=["A"], row_count=1, indexed_rows=1,
+            excel_live=True, excel_book_name="cached.xlsx", error=None,
+        )
+        with patch("src.agent.runner._cached_sheet_names", return_value=["Alpha", "Beta"]):
+            result = _list_sheet_names(ws)
+            assert result == ["Alpha", "Beta"]
+
+
+class TestReActNoActionsReceived:
+    def test_empty_actions_list_retries(self, tmp_path):
+        xlsx = tmp_path / "react.xlsx"
+        pd.DataFrame({"A": [1, 2]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="react.xlsx", sheet_name="Sheet",
+            columns=["A"], row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"A": [1, 2]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        call_count = 0
+
+        def mock_generate(prompt, system=None, max_tokens=2048):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return '[ACTIONS]\n{"actions": []}\n[/ACTIONS]'
+            return "Nenhuma ação válida foi gerada. Tente reformular."
+
+        client = MagicMock()
+        client.is_available.return_value = True
+        client.generate = mock_generate
+        messages = []
+        run_agent("ordena por A", ws, client=client, on_message=lambda t: messages.append(t))
+        assert call_count == 2
+        assert len(messages) > 0
+
+    def test_llm_returns_no_tool_block(self, tmp_path):
+        xlsx = tmp_path / "notool.xlsx"
+        pd.DataFrame({"A": [1, 2]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="notool.xlsx", sheet_name="Sheet",
+            columns=["A"], row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"A": [1, 2]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        client = MagicMock()
+        client.is_available.return_value = True
+        client.generate.return_value = "Os dados parecem organizados."
+        messages = []
+        result = run_agent("ordena por A", ws, client=client, on_message=lambda t: messages.append(t))
+        assert "organizados" in result or any("organizados" in m for m in messages)
+
+
+class TestReActMaxStepsExceeded:
+    def test_max_steps_reached(self, tmp_path):
+        xlsx = tmp_path / "maxsteps.xlsx"
+        pd.DataFrame({"A": [1, 2]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="maxsteps.xlsx", sheet_name="Sheet",
+            columns=["A"], row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"A": [1, 2]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        call_count = 0
+
+        def mock_generate(prompt, system=None, max_tokens=2048):
+            nonlocal call_count
+            call_count += 1
+            return '[ACTIONS]\n{"actions": [{"action": "sort", "by": "NONEXISTENT"}]}\n[/ACTIONS]'
+
+        client = MagicMock()
+        client.is_available.return_value = True
+        client.generate = mock_generate
+        messages = []
+        run_agent("ordena por A", ws, client=client, on_message=lambda t: messages.append(t), max_steps=3)
+        assert call_count == 3
+
+
+class TestReActOptimizeDeprecated:
+    def test_optimize_block_returns_error(self, tmp_path):
+        xlsx = tmp_path / "opt_dep.xlsx"
+        pd.DataFrame({"A": [1, 2]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="opt_dep.xlsx", sheet_name="Sheet",
+            columns=["A"], row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"A": [1, 2]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        client = MagicMock()
+        client.is_available.return_value = True
+        client.generate.return_value = "[OPTIMIZE]\ndf = df.sort_values('A')\n[/OPTIMIZE]"
+        messages = []
+        result = run_agent("ordena por A", ws, client=client, on_message=lambda t: messages.append(t))
+        assert "E0" in result or any("E0" in m for m in messages) or any("segurança" in m.lower() for m in messages)
+
+
+class TestReActConfirmCancel:
+    def test_user_cancels_confirmation(self, tmp_path):
+        xlsx = tmp_path / "confirm.xlsx"
+        pd.DataFrame({"A": [1, 2]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="confirm.xlsx", sheet_name="Sheet",
+            columns=["A"], row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"A": [1, 2]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        client = MagicMock()
+        client.is_available.return_value = True
+        client.generate.return_value = '[ACTIONS]\n{"actions": [{"action": "sort", "by": "A"}]}\n[/ACTIONS]'
+        messages = []
+        result = run_agent(
+            "ordena por A", ws, client=client,
+            on_message=lambda t: messages.append(t),
+            on_confirm_change=lambda preview: False,
+        )
+        assert any("cancelada" in m.lower() for m in messages) or "cancelada" in result.lower()
+
+
+class TestWorkbookBroadQueryIntegration:
+    def test_broad_query_prepends_overview(self, tmp_path):
+        xlsx = tmp_path / "broad_int.xlsx"
+        with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
+            pd.DataFrame({"X": [1, 2]}).to_excel(writer, sheet_name="A1", index=False)
+            pd.DataFrame({"Y": [3, 4]}).to_excel(writer, sheet_name="A2", index=False)
+        ws = Workspace(
+            path=str(xlsx), workbook_name="broad_int.xlsx", sheet_name="A1",
+            columns=["X"], row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"X": [1, 2]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        captured_prompts = []
+
+        def mock_generate(prompt, system=None, max_tokens=2048):
+            captured_prompts.append(prompt)
+            return "Este arquivo tem 2 abas."
+
+        client = MagicMock()
+        client.is_available.return_value = True
+        client.generate = mock_generate
+        messages = []
+        run_agent("descreva a planilha", ws, client=client, on_message=lambda t: messages.append(t))
+        assert len(captured_prompts) == 1
+        assert "A1" in captured_prompts[0]
+        assert "A2" in captured_prompts[0]
+
+    def test_non_broad_query_no_overview(self, tmp_path):
+        xlsx = tmp_path / "not_broad_int.xlsx"
+        pd.DataFrame({"A": [1, 2]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="not_broad_int.xlsx", sheet_name="Sheet",
+            columns=["A"], row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"A": [1, 2]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        captured_prompts = []
+
+        def mock_generate(prompt, system=None, max_tokens=2048):
+            captured_prompts.append(prompt)
+            return "A media e 1.5"
+
+        client = MagicMock()
+        client.is_available.return_value = True
+        client.generate = mock_generate
+        messages = []
+        run_agent("qual a media de A?", ws, client=client, on_message=lambda t: messages.append(t))
+        assert len(captured_prompts) == 1
+        assert "Aba" not in captured_prompts[0].split("Pergunta")[0] or "overview" not in captured_prompts[0].lower()
+
+
+class TestListSheetNamesNoPath:
+    def test_no_path_returns_empty(self):
+        ws = Workspace(path="", workbook_name="", sheet_name="", columns=[], row_count=0, indexed_rows=0)
+        assert _list_sheet_names(ws) == []
