@@ -13,7 +13,13 @@ from functools import lru_cache
 
 from ..checkpoints.manager import CheckpointManager
 from ..errcodes import ErrCode, err_str
-from ..indexing.excel_reader import Workspace, get_workspace_summary, hydrate_workspace_full, index_from_path
+from ..indexing.excel_reader import (
+    Workspace,
+    get_workbook_overview,
+    get_workspace_summary,
+    hydrate_workspace_full,
+    index_from_path,
+)
 from ..integrations import handle_integration_query
 from .llm_client import LLMClient
 from .ollama_client import OllamaClient
@@ -38,6 +44,23 @@ _MODIFY_SIGNALS = re.compile(
 def _is_read_only_intent(query: str) -> bool:
     """Returns True when query contains no explicit modification keyword."""
     return not bool(_MODIFY_SIGNALS.search(query))
+
+
+_WORKBOOK_BROAD = re.compile(
+    r"\b(workbook|planilha inteira|todas as abas|resumo do arquivo|"
+    r"visão geral|overview|o que tem|conteúdo|conteudo|"
+    r"descreva o arquivo|descreva a planilha|resumo completo)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_workbook_broad_query(query: str, workspace: Workspace) -> bool:
+    """Returns True when query is about the workbook as a whole, not a specific sheet."""
+    if not workspace.path:
+        return False
+    if _detect_sheet_name(query, workspace):
+        return False
+    return bool(_WORKBOOK_BROAD.search(query))
 
 
 # ---------------------------------------------------------------------------
@@ -340,8 +363,14 @@ def run_agent(
             workspace = switched
         client = client or OllamaClient()
         if client.is_available():
+            context_parts: list[str] = []
+            if _is_workbook_broad_query(query, workspace):
+                overview = get_workbook_overview(workspace.path)
+                context_parts.append(overview)
             data_summary = get_workspace_summary(workspace)
-            ro_prompt = f"Dados da planilha:\n{data_summary}\n\nPergunta: {query}"
+            context_parts.append(f"Dados da aba ativa:\n{data_summary}")
+            context_text = "\n\n".join(context_parts)
+            ro_prompt = f"{context_text}\n\nPergunta: {query}"
             response = client.generate(ro_prompt, system=SYSTEM)
             log.info("[perf] read-only path: %.2fs", time.monotonic() - t0)
             clean = re.sub(r"\[/?(?:ACTIONS|OPTIMIZE)\]", "", response).strip()
@@ -390,9 +419,12 @@ def run_agent(
 
     cp = CheckpointManager(workspace.path, interaction_label="Otimização")
 
-    # Dados iniciais para o LLM
+    context_block = ""
+    if _is_workbook_broad_query(query, workspace):
+        overview = get_workbook_overview(workspace.path)
+        context_block = overview + "\n\n"
     data_summary = get_workspace_summary(workspace)
-    prompt = f"""Dados atuais da planilha:
+    prompt = f"""{context_block}Dados atuais da aba ativa:
 {data_summary}
 
 Pergunta do usuário: {query}

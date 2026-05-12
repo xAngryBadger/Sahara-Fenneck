@@ -8,6 +8,7 @@ from src.agent.runner import (
     _extract_loose_actions,
     _handle_sheet_query,
     _is_read_only_intent,
+    _is_workbook_broad_query,
     _strip_tool_payload_from_response,
     run_agent,
 )
@@ -130,3 +131,33 @@ class TestRunAgentReadOnly:
         messages = []
         result = run_agent("ordena por A", ws, client=client, on_message=lambda t: messages.append(t))
         assert any("erro" in m.lower() or "E0" in m for m in messages) or "E0" in result
+
+
+class TestIsWorkbookBroadQuery:
+    def test_broad_keywords(self, tmp_path):
+        import pandas as pd
+        xlsx = tmp_path / "bq.xlsx"
+        pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(path=str(xlsx), workbook_name="bq.xlsx", sheet_name="Sheet1", columns=["A"], row_count=1, indexed_rows=1)
+        assert _is_workbook_broad_query("descreva a planilha", ws) is True
+        assert _is_workbook_broad_query("visão geral do arquivo", ws) is True
+        assert _is_workbook_broad_query("o que tem nesse workbook?", ws) is True
+
+    def test_specific_sheet_not_broad(self, tmp_path):
+        import pandas as pd
+        xlsx = tmp_path / "bq.xlsx"
+        pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(path=str(xlsx), workbook_name="bq.xlsx", sheet_name="Sheet1", columns=["A"], row_count=1, indexed_rows=1)
+        with patch("src.agent.runner._detect_sheet_name", return_value="Vendas"):
+            assert _is_workbook_broad_query("descreva a aba Vendas", ws) is False
+
+    def test_no_path_not_broad(self):
+        ws = Workspace(path="", workbook_name="", sheet_name="", columns=[], row_count=0, indexed_rows=0)
+        assert _is_workbook_broad_query("visão geral", ws) is False
+
+    def test_specific_query_not_broad(self, tmp_path):
+        import pandas as pd
+        xlsx = tmp_path / "bq.xlsx"
+        pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(path=str(xlsx), workbook_name="bq.xlsx", sheet_name="Sheet1", columns=["A"], row_count=1, indexed_rows=1)
+        assert _is_workbook_broad_query("qual a media de A?", ws) is False

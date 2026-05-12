@@ -381,21 +381,340 @@ def index_open_excel_workbooks(include_all_sheets: bool = False, max_rows: int =
         ]
 
 
-def get_workspace_summary(ws: Workspace) -> str:
-    """Texto resumido da workspace para o LLM (GetData)."""
+def _is_nontabular(ws: Workspace) -> bool:
+    """Detecta abas com layout não-tabular (células mescladas, formatação livre).
+
+    Heurística: >50% das colunas são "Unnamed" ou "ColN" (auto-geradas) E poucas linhas.
+    """
+    if ws.df is None or ws.df.empty:
+        return False
+    auto_names = 0
+    for col in ws.columns:
+        c = str(col)
+        if c.startswith("Unnamed") or c.startswith("Col") and c[3:].isdigit():
+            auto_names += 1
+    if len(ws.columns) == 0:
+        return False
+    ratio = auto_names / len(ws.columns)
+    return ratio > 0.5 and ws.row_count < 50
+
+
+def _fmt_number(value: object) -> str:
+    """Formata número para resumo: 2 casas decimais se float, int se inteiro."""
+    try:
+        f = float(str(value))
+        if f != f:
+            return "NaN"
+        if f == int(f) and abs(f) < 1e15:
+            return str(int(f))
+        return f"{f:.2f}"
+    except Exception:
+        return str(value)
+
+
+def _build_column_stats(ws: Workspace) -> list[str]:
+    """Estatísticas por coluna para o contexto do LLM."""
+    if ws.df is None or ws.df.empty:
+        return []
+    import pandas as pd
+
+    lines: list[str] = []
+    for col in ws.columns:
+        series = ws.df[col]
+        nulls = int(series.isna().sum())
+        dtype_str = str(series.dtype)
+
+        if pd.api.types.is_numeric_dtype(series):
+            non_na = series.dropna()
+            if len(non_na) == 0:
+                lines.append(f"  {col} ({dtype_str}): {nulls} nulos (100%)")
+                continue
+            parts = [f"{col} ({dtype_str}):"]
+            parts.append(f"min={_fmt_number(non_na.min())}")
+            parts.append(f"max={_fmt_number(non_na.max())}")
+            if len(non_na) > 1:
+                parts.append(f"mean={_fmt_number(non_na.mean())}")
+            parts.append(f"{nulls} nulos" if nulls else "0 nulos")
+            lines.append("  " + ", ".join(parts))
+        else:
+            unique_count = series.nunique(dropna=True)
+            parts = [f"{col} ({dtype_str}):"]
+            parts.append(f"{unique_count} únicos")
+            if nulls:
+                parts.append(f"{nulls} nulos")
+            else:
+                parts.append("0 nulos")
+            if unique_count <= 15 and unique_count > 0:
+                top = series.value_counts(dropna=True).head(5)
+                top_str = ", ".join(f"{v} ({c}x)" for v, c in top.items())
+                parts.append(f"mais comuns: {top_str}")
+            lines.append("  " + ", ".join(parts))
+    return lines
+
+
+def _build_sample_block(ws: Workspace, head_n: int = 5, tail_n: int = 5) -> str:
+    """Bloco de amostra head+tail para o contexto do LLM."""
+    if ws.df is None or ws.df.empty:
+        return ""
+
+    parts: list[str] = []
+    if len(ws.df) <= head_n + tail_n:
+        parts.append(ws.df.to_string())
+    else:
+        head = ws.df.head(head_n)
+        parts.append(f"Primeiras {head_n} linhas:")
+        parts.append(head.to_string())
+        tail = ws.df.tail(tail_n)
+        parts.append(f"Últimas {tail_n} linhas:")
+        parts.append(tail.to_string())
+    return "\n".join(parts)
+
+
+def _build_categorical_values(ws: Workspace, max_unique: int = 15) -> list[str]:
+    """Lista valores únicos de colunas categóricas com poucos valores."""
+    if ws.df is None or ws.df.empty:
+        return []
+    import pandas as pd
+
+    lines: list[str] = []
+    for col in ws.columns:
+        series = ws.df[col]
+        if pd.api.types.is_numeric_dtype(series):
+            continue
+        nunique = series.nunique(dropna=True)
+        if nunique == 0 or nunique > max_unique:
+            continue
+        vals = series.dropna().unique()
+        val_str = ", ".join(str(v) for v in vals[:max_unique])
+        lines.append(f"  {col}: {val_str}")
+    return lines
+
+
+def get_workspace_summary(ws: Workspace, max_context_chars: int = 6000) -> str:
+    """Contexto rico da workspace para o LLM — dtypes, stats, amostra head+tail, valores categóricos.
+
+    Parâmetro max_context_chars: limite de caracteres (~2K tokens). Se excedido,
+    trima progressivamente: valores categóricos → tail → reduz head → remove stats.
+    """
     if ws.error:
         return ws.error
 
-    lines = [
-        f"Arquivo: {ws.workbook_name}",
-        f"Aba: {ws.sheet_name}",
-        f"Colunas ({len(ws.columns)}): {', '.join(ws.columns[:20])}{'...' if len(ws.columns) > 20 else ''}",
-        f"Linhas totais: {ws.row_count}",
-        f"Linhas indexadas: {ws.indexed_rows}{' (amostra)' if ws.truncated else ''}",
-    ]
+    lines: list[str] = []
+
+    lines.append(f"Arquivo: {ws.workbook_name}")
+    lines.append(f"Aba: {ws.sheet_name}")
+
+    if _is_nontabular(ws):
+        lines.append("")
+        lines.append("⚠ Esta aba parece ter layout não-tabular (células mescladas ou formatação livre).")
+        lines.append("Colunas detectadas automaticamente podem não representar os dados corretamente.")
+        lines.append("Considere usar \"aba [Nome]\" para navegar para uma aba mais estruturada.")
+
+    col_display = ", ".join(ws.columns[:20])
+    if len(ws.columns) > 20:
+        col_display += "..."
+    lines.append(f"Colunas ({len(ws.columns)}): {col_display}")
+
     if ws.df is not None and not ws.df.empty:
-        lines.append("Amostra (5 primeiras linhas):")
-        lines.append(ws.df.head().to_string())
+
+        dtype_parts = []
+        for col in ws.columns:
+            dtype_parts.append(f"{col}={str(ws.df[col].dtype)}")
+        lines.append(f"Tipos: {', '.join(dtype_parts[:20])}")
+
+    lines.append(f"Linhas: {ws.indexed_rows}{'/' + str(ws.row_count) if ws.truncated else ''}")
+
+    if ws.df is not None and not ws.df.empty:
+        lines.append("")
+        lines.append("Estatísticas por coluna:")
+        col_stats = _build_column_stats(ws)
+        lines.extend(col_stats)
+
+        cat_lines = _build_categorical_values(ws)
+        if cat_lines:
+            lines.append("")
+            lines.append("Valores únicos (categóricas com ≤15 únicos):")
+            lines.extend(cat_lines)
+
+        sample = _build_sample_block(ws)
+        if sample:
+            lines.append("")
+            lines.append(sample)
+
+    text = "\n".join(lines)
+
+    if len(text) <= max_context_chars:
+        return text
+
+    return _trim_summary(text, ws, max_context_chars)
+
+
+def _trim_summary(text: str, ws: Workspace, max_chars: int) -> str:
+    """Trima o resumo progressivamente até caber no orçamento de caracteres."""
+    if len(text) <= max_chars:
+        return text
+
+    lines = text.split("\n")
+
+    def _find_block_end(start_idx: int, lines_list: list[str]) -> int:
+        for i in range(start_idx + 1, len(lines_list)):
+            line = lines_list[i]
+            if line and not line.startswith("  ") and not line[0].isdigit():
+                return i
+        return len(lines_list)
+
+    categorical_start = None
+    for i, line in enumerate(lines):
+        if "Valores únicos (categóricas" in line:
+            categorical_start = i
+            break
+
+    if categorical_start is not None:
+        block_end = _find_block_end(categorical_start, lines)
+        lines = lines[:categorical_start] + lines[block_end:]
+        text = "\n".join(lines)
+        if len(text) <= max_chars:
+            return text
+
+    tail_marker = "Últimas"
+    tail_idx = None
+    for i, line in enumerate(lines):
+        if line.startswith(tail_marker):
+            tail_idx = i
+            break
+    if tail_idx is not None:
+        block_end = _find_block_end(tail_idx, lines)
+        lines = lines[:tail_idx] + lines[block_end:]
+        text = "\n".join(lines)
+        if len(text) <= max_chars:
+            return text
+
+    stats_start = None
+    for i, line in enumerate(lines):
+        if "Estatísticas por coluna:" in line:
+            stats_start = i
+            break
+    if stats_start is not None:
+        block_end = _find_block_end(stats_start, lines)
+        lines = lines[:stats_start] + lines[block_end:]
+        text = "\n".join(lines)
+        if len(text) <= max_chars:
+            return text
+
+    if len(text) > max_chars:
+        text = text[:max_chars - 3] + "..."
+
+    return text
+
+    tail_marker = "Últimas"
+    tail_idx = None
+    for i, line in enumerate(lines):
+        if line.startswith(tail_marker):
+            tail_idx = i
+            break
+    if tail_idx is not None:
+        end = tail_idx + 1
+        for i in range(end, len(lines)):
+            if lines[i] and not lines[i].startswith(" "):
+                end = i
+                break
+        else:
+            end = len(lines)
+        lines = lines[:tail_idx] + lines[end:]
+        text = "\n".join(lines)
+        if len(text) <= max_chars:
+            return text
+
+    stats_start = None
+    for i, line in enumerate(lines):
+        if "Estatísticas por coluna:" in line:
+            stats_start = i
+            break
+    if stats_start is not None:
+        next_section = None
+        for i in range(stats_start + 1, len(lines)):
+            if lines[i] and not lines[i].startswith("  "):
+                next_section = i
+                break
+        if next_section is None:
+            next_section = len(lines)
+        lines = lines[:stats_start] + lines[next_section:]
+        text = "\n".join(lines)
+        if len(text) <= max_chars:
+            return text
+
+    if len(text) > max_chars:
+        text = text[:max_chars - 3] + "..."
+
+    return text
+
+
+def get_workbook_overview(file_path: str, max_rows_per_sheet: int = 3) -> str:
+    """Visão compacta de todas as abas do workbook para o LLM.
+
+    Lê apenas as primeiras linhas de cada aba para gerar um índice com:
+    nome da aba, colunas, contagem de linhas, e flag de não-tabular.
+    """
+    p = Path(file_path).resolve()
+    if not p.exists():
+        return err_str(ErrCode.FILE_NOT_FOUND)
+
+    engine = _engine_for_suffix(p.suffix)
+    if engine is None:
+        return err_str(ErrCode.FILE_INVALID_FORMAT)
+
+    import pandas as pd
+
+    try:
+        xl = pd.ExcelFile(str(p), engine=engine)
+    except Exception as e:
+        log.exception("Erro ao abrir workbook para overview (engine=%s): %s", engine, e)
+        return err_str(ErrCode.INDEX_FAILED, str(e))
+
+    all_names: list[str] = list(xl.sheet_names)
+    if not all_names:
+        xl.close()
+        return f"Workbook: {p.name} — nenhuma aba encontrada."
+
+    lines = [f"Workbook: {p.name} ({len(all_names)} aba(s))", "", "Resumo das abas:"]
+
+    for idx, name in enumerate(all_names, 1):
+        try:
+            df = pd.read_excel(xl, sheet_name=name, nrows=max_rows_per_sheet)
+        except Exception:
+            lines.append(f"  {idx}. {name} — ⚠ erro de leitura")
+            continue
+
+        if df.empty and df.columns.empty:
+            lines.append(f"  {idx}. {name} — vazia")
+            continue
+
+        headers = [str(c).strip() for c in df.columns]
+        auto_count = sum(
+            1 for h in headers
+            if h.startswith("Unnamed") or (h.startswith("Col") and h[3:].isdigit())
+        )
+        nontabular = auto_count > len(headers) * 0.5
+
+        total_rows: int | str = "?"
+        try:
+            full_df = pd.read_excel(xl, sheet_name=name)
+            total_rows = len(full_df)
+        except Exception:
+            pass
+
+        col_preview = ", ".join(headers[:6])
+        if len(headers) > 6:
+            col_preview += "..."
+        nontab_marker = " ⚠ não-tabular" if nontabular else ""
+        lines.append(f"  {idx}. {name}{nontab_marker} — {len(headers)} col, {total_rows} linhas [{col_preview}]")
+
+    xl.close()
+
+    if len(all_names) > 20:
+        lines.append("")
+        lines.append(f"Exibindo {len(all_names)} abas. Use \"aba [nome]\" para detalhar uma aba específica.")
+
     return "\n".join(lines)
 
 
