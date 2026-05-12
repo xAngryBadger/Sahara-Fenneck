@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 """
 Gradiente vertical otimizado (usa faixas em vez de pixel-a-pixel para performance).
 """
 import tkinter as tk
+
 from . import styles as s
 
 BANDS = 120  # mais faixas = mais suave, mas razoável para performance
@@ -20,7 +20,7 @@ def _lerp_color(c1: tuple, c2: tuple, t: float) -> str:
     return f"#{r:02x}{g:02x}{b:02x}"
 
 
-def draw_vertical_gradient(canvas: tk.Canvas, top_hex: str = None, bottom_hex: str = None):
+def draw_vertical_gradient(canvas: tk.Canvas, top_hex: str | None = None, bottom_hex: str | None = None):
     top_hex = top_hex or s.GRADIENT_TOP
     bottom_hex = bottom_hex or s.GRADIENT_BOTTOM
     canvas.delete("gradient")

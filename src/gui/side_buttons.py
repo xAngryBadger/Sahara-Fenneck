@@ -1,8 +1,8 @@
-﻿# -*- coding: utf-8 -*-
 """
 Botões laterais de navegação principal.
 """
 import customtkinter as ctk
+
 from . import styles as s
 
 

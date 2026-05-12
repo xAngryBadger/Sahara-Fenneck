@@ -1,19 +1,23 @@
-# -*- coding: utf-8 -*-
 """
 Tools do agente:
-- GetData: resumo da planilha indexada
-- Optimize: executa código validado e aplica em tempo real com checkpoint prévio
+- StructuredActions: aplica ações declarativas (sort, fillna, replace, etc.) sem exec()
+- Sandbox: valida código (legado — usado apenas por testes de segurança)
 """
 from __future__ import annotations
 
 import ast
 import json
-from typing import Optional, Callable
+import logging
+from collections.abc import Callable
+from pathlib import Path
 
-from ..indexing.excel_reader import Workspace, get_workspace_summary
 from ..checkpoints.manager import CheckpointManager
+from ..indexing.excel_reader import Workspace
+from .result import ErrCode, ToolResult
 
-ALLOWED_MODULES = {"pandas", "openpyxl", "math", "datetime"}
+log = logging.getLogger(__name__)
+
+ALLOWED_MODULES = {"pandas", "openpyxl", "odf", "xlrd", "math", "datetime"}
 FORBIDDEN_NAMES = {
     "__import__",
     "eval",
@@ -26,6 +30,23 @@ FORBIDDEN_NAMES = {
     "os",
     "sys",
     "subprocess",
+    "getattr",
+    "setattr",
+    "delattr",
+    "hasattr",
+    "type",
+    "vars",
+    "dir",
+    "breakpoint",
+    "exit",
+    "quit",
+    "help",
+    "memoryview",
+    "bytearray",
+    "classmethod",
+    "staticmethod",
+    "property",
+    "super",
 }
 SAFE_BUILTINS = {
     "abs": abs,
@@ -48,15 +69,15 @@ SAFE_BUILTINS = {
     "sum": sum,
     "tuple": tuple,
     "zip": zip,
-    "Exception": Exception,
     "ValueError": ValueError,
     "TypeError": TypeError,
+    "KeyError": KeyError,
+    "IndexError": IndexError,
+    "AttributeError": AttributeError,
+    "RuntimeError": RuntimeError,
+    "ZeroDivisionError": ZeroDivisionError,
+    "StopIteration": StopIteration,
 }
-
-
-def get_data_tool(workspace: Workspace) -> str:
-    """Retorna resumo da planilha para o LLM."""
-    return get_workspace_summary(workspace)
 
 
 def _normalize_actions(actions_payload: str) -> tuple[list[dict], str]:
@@ -65,6 +86,7 @@ def _normalize_actions(actions_payload: str) -> tuple[list[dict], str]:
     try:
         raw = json.loads(actions_payload)
     except Exception as e:
+        log.warning("JSON inválido em [ACTIONS]: %s", e)
         return [], f"JSON inválido em [ACTIONS]: {e!s}"
 
     if isinstance(raw, dict):
@@ -190,6 +212,168 @@ def _apply_actions_to_df(df, actions: list[dict]):
                 return None, f"Ação #{idx} filter_equals: {err}"
             out = out[out[col] == a.get("value")].reset_index(drop=True)
 
+        elif kind == "dropna":
+            cols = a.get("columns")
+            if cols is None:
+                out = out.dropna(how=a.get("how", "any"))
+            else:
+                if isinstance(cols, str):
+                    cols = [cols]
+                if not isinstance(cols, list) or not cols:
+                    return None, f"Ação #{idx} dropna: campo 'columns' inválido."
+                missing = [c for c in cols if c not in out.columns]
+                if missing:
+                    return None, f"Ação #{idx} dropna: colunas ausentes: {', '.join(map(str, missing))}"
+                how = str(a.get("how", "any")).lower()
+                if how not in {"any", "all"}:
+                    how = "any"
+                out = out.dropna(subset=cols, how=how).reset_index(drop=True)
+
+        elif kind == "groupby_agg":
+            group_by = a.get("group_by")
+            if isinstance(group_by, str):
+                group_by = [group_by]
+            if not isinstance(group_by, list) or not group_by:
+                return None, f"Ação #{idx} groupby_agg: campo 'group_by' inválido."
+            for c in group_by:
+                ok, err = _require_column(out, str(c))
+                if not ok:
+                    return None, f"Ação #{idx} groupby_agg: {err}"
+            agg_col = str(a.get("agg_column", "")).strip()
+            ok, err = _require_column(out, agg_col)
+            if not ok:
+                return None, f"Ação #{idx} groupby_agg: {err}"
+            agg_func = str(a.get("agg_func", "mean")).strip().lower()
+            valid_funcs = {"mean", "sum", "min", "max", "count", "median", "std", "var", "first", "last"}
+            if agg_func not in valid_funcs:
+                return None, f"Ação #{idx} groupby_agg: função de agregação não suportada: {agg_func}. Use: {', '.join(sorted(valid_funcs))}"
+            grouped = out.groupby(group_by, sort=False)[agg_col].agg(agg_func).reset_index()
+            grouped.columns = list(group_by) + [agg_col]
+            out = grouped
+
+        elif kind == "filter_contains":
+            col = str(a.get("column", "")).strip()
+            ok, err = _require_column(out, col)
+            if not ok:
+                return None, f"Ação #{idx} filter_contains: {err}"
+            value = str(a.get("value", ""))
+            case = a.get("case_sensitive", False)
+            if case:
+                mask = out[col].astype(str).str.contains(value, regex=False, na=False)
+            else:
+                mask = out[col].astype(str).str.contains(value, regex=False, na=False, case=False)
+            out = out[mask].reset_index(drop=True)
+
+        elif kind == "filter_range":
+            col = str(a.get("column", "")).strip()
+            ok, err = _require_column(out, col)
+            if not ok:
+                return None, f"Ação #{idx} filter_range: {err}"
+            nums = pd.to_numeric(out[col], errors="coerce")
+            lo = a.get("min")
+            hi = a.get("max")
+            if lo is not None:
+                nums = nums.where(nums >= float(lo))
+            if hi is not None:
+                nums = nums.where(nums <= float(hi))
+            out = out[nums.notna()].reset_index(drop=True)
+
+        elif kind == "pivot_table":
+            index_cols = a.get("index")
+            if isinstance(index_cols, str):
+                index_cols = [index_cols]
+            if not isinstance(index_cols, list) or not index_cols:
+                return None, f"Ação #{idx} pivot_table: campo 'index' inválido (lista de colunas para agrupar)."
+            for c in index_cols:
+                ok, err = _require_column(out, str(c))
+                if not ok:
+                    return None, f"Ação #{idx} pivot_table: {err}"
+            values_col = str(a.get("values", "")).strip()
+            if values_col:
+                ok, err = _require_column(out, values_col)
+                if not ok:
+                    return None, f"Ação #{idx} pivot_table: {err}"
+            columns_col = a.get("columns")
+            if isinstance(columns_col, str):
+                columns_col = [columns_col]
+            if columns_col:
+                for c in columns_col:
+                    if isinstance(c, str):
+                        ok, err = _require_column(out, c)
+                        if not ok:
+                            return None, f"Ação #{idx} pivot_table: {err}"
+            agg_func = str(a.get("agg_func", "sum")).strip().lower()
+            valid_pv_funcs = {"mean", "sum", "min", "max", "count", "median", "std", "var", "first", "last"}
+            if agg_func not in valid_pv_funcs:
+                return None, f"Ação #{idx} pivot_table: agg_func não suportada: {agg_func}. Use: {', '.join(sorted(valid_pv_funcs))}"
+            pv_kwargs: dict = {"index": index_cols, "aggfunc": agg_func}
+            if values_col:
+                pv_kwargs["values"] = values_col
+            if columns_col:
+                pv_kwargs["columns"] = columns_col
+            try:
+                pv = out.pivot_table(**pv_kwargs).reset_index()
+            except Exception as e:
+                return None, f"Ação #{idx} pivot_table: erro ao gerar pivot: {e!s}"
+            out = pv
+
+        elif kind == "merge_columns":
+            cols = a.get("columns")
+            if isinstance(cols, str):
+                cols = [cols]
+            if not isinstance(cols, list) or not cols:
+                return None, f"Ação #{idx} merge_columns: campo 'columns' inválido."
+            for c in cols:
+                ok, err = _require_column(out, str(c))
+                if not ok:
+                    return None, f"Ação #{idx} merge_columns: {err}"
+            new_col = str(a.get("new_column", "")).strip()
+            if not new_col:
+                return None, f"Ação #{idx} merge_columns: campo 'new_column' é obrigatório."
+            sep = str(a.get("separator", " "))
+            out[new_col] = out[cols].astype(str).agg(sep.join, axis=1)
+
+        elif kind == "strip_whitespace":
+            cols = a.get("columns")
+            if cols is None:
+                str_cols = [c for c in out.columns if out[c].dtype == object]
+            else:
+                if isinstance(cols, str):
+                    cols = [cols]
+                if not isinstance(cols, list) or not cols:
+                    return None, f"Ação #{idx} strip_whitespace: campo 'columns' inválido."
+                str_cols = [str(c) for c in cols]
+                for c in str_cols:
+                    ok, err = _require_column(out, c)
+                    if not ok:
+                        return None, f"Ação #{idx} strip_whitespace: {err}"
+            for c in str_cols:
+                if c in out.columns and out[c].dtype == object:
+                    out[c] = out[c].astype(str).str.strip()
+
+        elif kind == "change_dtype":
+            col = str(a.get("column", "")).strip()
+            ok, err = _require_column(out, col)
+            if not ok:
+                return None, f"Ação #{idx} change_dtype: {err}"
+            dtype = str(a.get("dtype", "")).strip().lower()
+            valid_dtypes = {"int", "float", "str", "bool", "datetime"}
+            if dtype not in valid_dtypes:
+                return None, f"Ação #{idx} change_dtype: tipo não suportado: {dtype}. Use: {', '.join(sorted(valid_dtypes))}"
+            try:
+                if dtype == "int":
+                    out[col] = pd.to_numeric(out[col], errors="coerce").astype("Int64")
+                elif dtype == "float":
+                    out[col] = pd.to_numeric(out[col], errors="coerce").astype(float)
+                elif dtype == "str":
+                    out[col] = out[col].astype(str)
+                elif dtype == "bool":
+                    out[col] = out[col].astype(bool)
+                elif dtype == "datetime":
+                    out[col] = pd.to_datetime(out[col], errors="coerce")
+            except Exception as e:
+                return None, f"Ação #{idx} change_dtype: erro ao converter coluna '{col}' para {dtype}: {e!s}"
+
         else:
             return None, f"Ação #{idx} desconhecida: {kind}"
 
@@ -213,37 +397,19 @@ def _validate_code(code: str) -> tuple[bool, str]:
                 return False, f"Módulo não permitido: {node.module}"
         if isinstance(node, ast.Name) and node.id in FORBIDDEN_NAMES:
             return False, f"Nome não permitido: {node.id}"
-        if isinstance(node, ast.Attribute) and str(node.attr).startswith("__"):
-            return False, "Acesso a atributos internos (__dunder__) não é permitido."
+        if isinstance(node, ast.Attribute):
+            attr = str(node.attr)
+            if attr.startswith("__"):
+                return False, "Acesso a atributos internos (__dunder__) não é permitido."
+            if attr in FORBIDDEN_NAMES:
+                return False, f"Acesso a atributo não permitido: {attr}"
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_NAMES:
             return False, f"Função não permitida: {node.func.id}"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            if node.func.attr in FORBIDDEN_NAMES:
+                return False, f"Chamada de método não permitida: {node.func.attr}"
 
     return True, ""
-
-
-def _resolve_excel_wb(workspace: Workspace):
-    """Resolve workbook COM aberto por path/nome (para alteração em tempo real)."""
-    pythoncom = None
-    try:
-        import pythoncom  # type: ignore
-        import win32com.client  # type: ignore
-
-        pythoncom.CoInitialize()
-        excel = win32com.client.GetActiveObject("Excel.Application")
-        if excel is None or excel.Workbooks.Count == 0:
-            return None, pythoncom
-
-        for wb in excel.Workbooks:
-            wb_name = str(getattr(wb, "Name", ""))
-            wb_full = str(getattr(wb, "FullName", ""))
-            if workspace.path and wb_full and wb_full.lower() == workspace.path.lower():
-                return wb, pythoncom
-            if workspace.excel_book_name and wb_name.lower() == workspace.excel_book_name.lower():
-                return wb, pythoncom
-
-        return None, pythoncom
-    except Exception:
-        return None, pythoncom
 
 
 def _excel_scalar(value):
@@ -253,14 +419,14 @@ def _excel_scalar(value):
         if pd.isna(value):
             return None
     except Exception:
-        pass
+        log.exception("Falha ao verificar valor NA com pandas")
 
     try:
         import numpy as np  # type: ignore
         if isinstance(value, np.generic):
             return value.item()
     except Exception:
-        pass
+        log.exception("Falha ao converter valor escalar numpy")
 
     return value
 
@@ -272,134 +438,27 @@ def _df_to_excel_matrix(df):
     return tuple(rows)
 
 
-def optimize_tool(
-    workspace: Workspace,
-    code: str,
-    checkpoint_manager: CheckpointManager,
-    on_checkpoint_saved: Optional[Callable[[str], None]] = None,
-    save_checkpoint: bool = True,
-) -> str:
-    """
-    Valida código, salva checkpoint, executa e aplica alterações.
-    """
-    ok, err = _validate_code(code)
-    if not ok:
-        return err
-
-    checkpoint_suffix = ""
-    # 1) Checkpoint antes da alteração (uma vez por ordem, controlado pelo caller)
-    if save_checkpoint:
-        try:
-            info = checkpoint_manager.save_checkpoint(workspace, label="Antes da ordem")
-            if on_checkpoint_saved:
-                on_checkpoint_saved(info.label)
-            checkpoint_suffix = " Checkpoint salvo antes da ordem."
-        except Exception as cp_err:
-            return f"Erro ao salvar checkpoint: {cp_err!s}"
-
-    # 2) Preparar ambiente local para execução
-    import pandas as pd
-    import openpyxl
-
-    df = workspace.df
-    if df is None:
-        df = pd.DataFrame(columns=workspace.columns or [])
-
-    wb_openpyxl = None
-    if workspace.path and not workspace.excel_live:
-        try:
-            wb_openpyxl = openpyxl.load_workbook(workspace.path)
-        except Exception:
-            wb_openpyxl = None
-
-    local = {
-        "df": df,
-        "pd": pd,
-        "openpyxl": openpyxl,
-        "wb": wb_openpyxl,
-        "workspace": workspace,
-    }
-
-    # 3) Executar código do agente
-    try:
-        exec(code, {"__builtins__": SAFE_BUILTINS, "pd": pd, "openpyxl": openpyxl}, local)
-    except Exception as e:
-        return f"Erro ao executar código: {e!s}"
-
-    new_df = local.get("df")
-    new_wb = local.get("wb")
-
-    # 4) Aplicar alterações
-    if workspace.excel_live:
-        wb, pycom = _resolve_excel_wb(workspace)
-        try:
-            if wb is None:
-                return "Excel aberto não encontrado para atualização em tempo real."
-            ws = wb.Worksheets(workspace.sheet_name) if workspace.sheet_name else wb.ActiveSheet
-
-            if new_df is not None and not new_df.empty:
-                ws.UsedRange.ClearContents()
-                nrows, ncols = new_df.shape[0] + 1, new_df.shape[1]
-                rows = _df_to_excel_matrix(new_df)
-                ws.Range(ws.Cells(1, 1), ws.Cells(nrows, ncols)).Value = rows
-            elif new_df is not None and new_df.empty:
-                ws.UsedRange.ClearContents()
-                if workspace.columns:
-                    header = tuple(str(c) for c in workspace.columns)
-                    ws.Range(ws.Cells(1, 1), ws.Cells(1, len(header))).Value = (header,)
-
-            wb.Save()
-        except Exception as e:
-            return f"Erro ao escrever no Excel: {e!s}"
-        finally:
-            if pycom is not None:
-                try:
-                    pycom.CoUninitialize()
-                except Exception:
-                    pass
-    else:
-        if new_wb is not None and workspace.path:
-            try:
-                # Se alterou somente df, reflete df na aba ativa do workbook.
-                if new_df is not None and not new_df.empty:
-                    ws = new_wb[workspace.sheet_name] if workspace.sheet_name in new_wb.sheetnames else new_wb.active
-                    ws.delete_rows(1, ws.max_row)
-                    ws.append(list(new_df.columns))
-                    for row in new_df.itertuples(index=False):
-                        ws.append(list(row))
-                new_wb.save(workspace.path)
-            except Exception as e:
-                return f"Erro ao salvar arquivo: {e!s}"
-        elif new_df is not None and not new_df.empty and workspace.path:
-            try:
-                new_df.to_excel(workspace.path, index=False, engine="openpyxl")
-            except Exception as e:
-                return f"Erro ao salvar arquivo: {e!s}"
-
-    # 5) Atualizar workspace em memória (sessão atual)
-    if new_df is not None:
-        workspace.df = new_df
-        workspace.columns = list(new_df.columns)
-        workspace.row_count = int(len(new_df))
-        workspace.indexed_rows = int(len(new_df))
-        workspace.truncated = False
-
-    return f"Otimização aplicada com sucesso.{checkpoint_suffix}"
+def _classify_err(msg: str) -> ErrCode:
+    if "Coluna" in msg and ("não encontrada" in msg or "ausente" in msg):
+        return ErrCode.COLUMN_MISSING
+    if "desconhecida" in msg:
+        return ErrCode.ACTION_UNKNOWN
+    return ErrCode.ACTION_INVALID
 
 
 def structured_actions_tool(
     workspace: Workspace,
     actions_payload: str,
     checkpoint_manager: CheckpointManager,
-    on_checkpoint_saved: Optional[Callable[[str], None]] = None,
+    on_checkpoint_saved: Callable[[str], None] | None = None,
     save_checkpoint: bool = True,
-) -> str:
+) -> ToolResult:
     """
     Executa ações estruturadas (JSON) sobre a planilha sem usar exec arbitrário.
     """
     actions, parse_err = _normalize_actions(actions_payload)
     if parse_err:
-        return parse_err
+        return ToolResult.err(parse_err, code=ErrCode.PARSE_ACTIONS)
 
     checkpoint_suffix = ""
     if save_checkpoint:
@@ -409,10 +468,11 @@ def structured_actions_tool(
                 on_checkpoint_saved(info.label)
             checkpoint_suffix = " Checkpoint salvo antes da ordem."
         except Exception as cp_err:
-            return f"Erro ao salvar checkpoint: {cp_err!s}"
+            log.exception("Falha ao salvar checkpoint (structured_actions)")
+            return ToolResult.err(f"Erro ao salvar checkpoint: {cp_err!s}", code=ErrCode.CHECKPOINT_SAVE)
 
-    import pandas as pd
     import openpyxl
+    import pandas as pd
 
     df = workspace.df
     if df is None:
@@ -426,24 +486,39 @@ def structured_actions_tool(
     if df_actions:
         new_df, err = _apply_actions_to_df(df, df_actions)
         if err:
-            return err
+            return ToolResult.err(err, code=_classify_err(err))
     else:
         new_df = df.copy() if df is not None else pd.DataFrame(columns=workspace.columns or [])
 
-    # Persistência segue a mesma estratégia do optimize_tool.
     wb_openpyxl = None
     if workspace.path and not workspace.excel_live:
+        save_path = workspace.path
+        original_suffix = Path(save_path).suffix.lower()
+        if original_suffix in (".ods", ".xls"):
+            save_path = str(Path(save_path).with_suffix(".xlsx"))
+            workspace.path = save_path
+            log.info("Conversão de formato: %s → %s", original_suffix, ".xlsx")
         try:
-            wb_openpyxl = openpyxl.load_workbook(workspace.path)
+            wb_openpyxl = openpyxl.load_workbook(save_path)
         except Exception:
+            log.exception("Falha ao carregar workbook com openpyxl (structured_actions)")
             wb_openpyxl = None
 
     new_wb = wb_openpyxl
     if workspace.excel_live:
-        wb, pycom = _resolve_excel_wb(workspace)
         try:
+            from ..com_utils import COMContext
+
+            ctx = COMContext()
+            ctx.__enter__()
+        except Exception:
+            ctx = None
+        try:
+            if ctx is None or not ctx.has_workbooks:
+                return ToolResult.err("Excel aberto não encontrado para atualização em tempo real.", code=ErrCode.EXCEL_NOT_FOUND)
+            wb = ctx.resolve_workbook(path=workspace.path, name=workspace.excel_book_name)
             if wb is None:
-                return "Excel aberto não encontrado para atualização em tempo real."
+                return ToolResult.err("Excel aberto não encontrado para atualização em tempo real.", code=ErrCode.EXCEL_NOT_FOUND)
             ws = wb.Worksheets(workspace.sheet_name) if workspace.sheet_name else wb.ActiveSheet
 
             # Apply workbook-level actions (COM)
@@ -484,18 +559,22 @@ def structured_actions_tool(
                     ws.Range(ws.Cells(1, 1), ws.Cells(1, len(header))).Value = (header,)
 
             wb.Save()
+            return ToolResult.ok(f"Otimização estruturada aplicada com sucesso (COM).{checkpoint_suffix}")
         except Exception as e:
-            return f"Erro ao escrever no Excel: {e!s}"
+            log.exception("Falha ao escrever no Excel via COM (structured_actions)")
+            return ToolResult.err(f"Erro ao escrever no Excel: {e!s}", code=ErrCode.EXCEL_WRITE_COM)
         finally:
-            if pycom is not None:
-                try:
-                    pycom.CoUninitialize()
-                except Exception:
-                    pass
+            if ctx is not None:
+                ctx.__exit__(None, None, None)
     else:
+        if wb_actions and new_wb is None:
+            return ToolResult.err(
+                "Operações de aba (duplicar/criar/excluir/renomear) não são suportadas para arquivos .ods/.xls. "
+                "Salve o arquivo como .xlsx primeiro.",
+                code=ErrCode.FILE_INVALID_FORMAT,
+            )
         if new_wb is not None and workspace.path:
             try:
-                # Apply workbook-level actions (file)
                 for a in wb_actions:
                     kind = str(a.get("action", "")).strip().lower()
                     base = workspace.sheet_name or "Aba"
@@ -524,18 +603,20 @@ def structured_actions_tool(
                         ws.append(list(row))
                 new_wb.save(workspace.path)
             except Exception as e:
-                return f"Erro ao salvar arquivo: {e!s}"
+                log.exception("Falha ao salvar arquivo com openpyxl (structured_actions)")
+                return ToolResult.err(f"Erro ao salvar arquivo: {e!s}", code=ErrCode.EXCEL_SAVE_OPENPYXL)
         elif df_actions and new_df is not None and workspace.path:
             try:
                 new_df.to_excel(workspace.path, index=False, engine="openpyxl")
             except Exception as e:
-                return f"Erro ao salvar arquivo: {e!s}"
+                log.exception("Falha ao salvar arquivo via to_excel (structured_actions)")
+                return ToolResult.err(f"Erro ao salvar arquivo: {e!s}", code=ErrCode.EXCEL_SAVE_DF)
 
-    if df_actions and new_df is not None:
-        workspace.df = new_df
-        workspace.columns = list(new_df.columns)
-        workspace.row_count = int(len(new_df))
-        workspace.indexed_rows = int(len(new_df))
-        workspace.truncated = False
+        if df_actions and new_df is not None:
+            workspace.df = new_df
+            workspace.columns = list(new_df.columns)
+            workspace.row_count = int(len(new_df))
+            workspace.indexed_rows = int(len(new_df))
+            workspace.truncated = False
 
-    return f"Otimização estruturada aplicada com sucesso.{checkpoint_suffix}"
+        return ToolResult.ok(f"Otimização estruturada aplicada com sucesso.{checkpoint_suffix}")

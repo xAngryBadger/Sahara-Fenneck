@@ -1,7 +1,7 @@
-# -*- coding: utf-8 -*-
-"""Agente ReAct: LLM local (Ollama) + tools GetData e Optimize (alteração em tempo real + checkpoint)."""
+"""Agente ReAct: LLM local (Ollama/NIM) + tool StructuredActions."""
+from .llm_client import LLMClient, create_client
 from .ollama_client import OllamaClient
-from .tools import get_data_tool, optimize_tool
 from .runner import run_agent
+from .tools import structured_actions_tool
 
-__all__ = ["OllamaClient", "get_data_tool", "optimize_tool", "run_agent"]
+__all__ = ["LLMClient", "create_client", "OllamaClient", "structured_actions_tool", "run_agent"]

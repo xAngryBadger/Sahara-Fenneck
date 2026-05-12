@@ -1,4 +1,3 @@
-﻿# -*- coding: utf-8 -*-
 """
 Gerencia checkpoints da planilha: um checkpoint é salvo antes de cada alteração
 que o agente aplicar, permitindo restaurar a qualquer momento.
@@ -6,13 +5,15 @@ que o agente aplicar, permitindo restaurar a qualquer momento.
 from __future__ import annotations
 
 import json
+import logging
 import shutil
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
 
 from ..indexing.excel_reader import Workspace
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -20,13 +21,16 @@ class CheckpointInfo:
     path: str
     timestamp: str
     label: str
-    interaction_id: Optional[int] = None
+    interaction_id: int | None = None
+
+
+_MAX_INDEX_ENTRIES_PER_WORKSPACE = 200
 
 
 class CheckpointManager:
     """Salva cópia da planilha antes de cada alteração; lista e restaura checkpoints."""
 
-    def __init__(self, workspace_path: str, interaction_label: Optional[str] = None):
+    def __init__(self, workspace_path: str, interaction_label: str | None = None):
         self.workspace_path = Path(workspace_path).resolve() if workspace_path else Path(".").resolve()
         self.root_dir = self.workspace_path.parent
         self.checkpoints_dir = self.root_dir / "_fennec_checkpoints"
@@ -39,6 +43,7 @@ class CheckpointManager:
         try:
             return str(Path(raw).resolve()).lower()
         except Exception:
+            log.warning("Falha ao normalizar caminho do workspace: %s", raw)
             return str(raw or "").strip().lower()
 
     def _ensure_dir(self) -> None:
@@ -50,42 +55,20 @@ class CheckpointManager:
 
     def _save_copy_from_excel_live(self, workspace: Workspace, dest: Path) -> bool:
         """Tenta SaveCopyAs no workbook aberto via COM (quando excel_live=True)."""
-        pythoncom = None
         try:
-            import pythoncom  # type: ignore
-            import win32com.client  # type: ignore
+            from ..com_utils import COMContext
 
-            pythoncom.CoInitialize()
-            excel = win32com.client.GetActiveObject("Excel.Application")
-            if excel is None or excel.Workbooks.Count == 0:
-                return False
-
-            target = None
-            for wb in excel.Workbooks:
-                wb_name = str(getattr(wb, "Name", ""))
-                wb_full = str(getattr(wb, "FullName", ""))
-                if workspace.path and wb_full and wb_full.lower() == workspace.path.lower():
-                    target = wb
-                    break
-                if workspace.excel_book_name and wb_name.lower() == workspace.excel_book_name.lower():
-                    target = wb
-                    break
-
-            if target is None:
-                return False
-
-            target.SaveCopyAs(str(dest))
-            return True
+            with COMContext() as ctx:
+                wb = ctx.resolve_workbook(path=workspace.path, name=workspace.excel_book_name)
+                if wb is None:
+                    return False
+                wb.SaveCopyAs(str(dest))
+                return True
         except Exception:
+            log.exception("Falha ao salvar cópia via COM SaveCopyAs")
             return False
-        finally:
-            if pythoncom is not None:
-                try:
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
 
-    def save_checkpoint(self, workspace: Workspace, label: Optional[str] = None) -> CheckpointInfo:
+    def save_checkpoint(self, workspace: Workspace, label: str | None = None) -> CheckpointInfo:
         """
         Salva um checkpoint da planilha atual (antes ou depois de uma alteração).
         Prioridade:
@@ -116,11 +99,12 @@ class CheckpointManager:
 
     def _append_to_index(self, info: CheckpointInfo) -> None:
         self._ensure_dir()
-        data = []
+        data: list[dict] = []
         if self.index_file.exists():
             try:
                 data = json.loads(self.index_file.read_text(encoding="utf-8"))
             except Exception:
+                log.warning("Falha ao ler índice de checkpoints; iniciando com lista vazia")
                 data = []
 
         data.append(
@@ -132,15 +116,32 @@ class CheckpointManager:
                 "interaction_id": info.interaction_id,
             }
         )
+
+        key = self._normalized_workspace_key()
+        workspace_entries = [e for e in data if self._normalized_workspace_key(e.get("workspace_path", "")) == key]
+        other_entries = [e for e in data if self._normalized_workspace_key(e.get("workspace_path", "")) != key]
+        if len(workspace_entries) > _MAX_INDEX_ENTRIES_PER_WORKSPACE:
+            workspace_entries = workspace_entries[-_MAX_INDEX_ENTRIES_PER_WORKSPACE:]
+            stale_paths = {
+                e["path"] for e in workspace_entries[: len(workspace_entries) - _MAX_INDEX_ENTRIES_PER_WORKSPACE]
+            }
+            for sp in stale_paths:
+                try:
+                    Path(sp).unlink(missing_ok=True)
+                except Exception:
+                    pass
+        data = other_entries + workspace_entries
+
         self.index_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    def list_checkpoints(self) -> List[CheckpointInfo]:
+    def list_checkpoints(self) -> list[CheckpointInfo]:
         """Lista checkpoints da planilha atual."""
         if not self.index_file.exists():
             return []
         try:
             data = json.loads(self.index_file.read_text(encoding="utf-8"))
         except Exception:
+            log.warning("Falha ao ler índice de checkpoints em list_checkpoints")
             return []
 
         key = self._normalized_workspace_key()
@@ -173,4 +174,5 @@ class CheckpointManager:
             shutil.copy2(src, self.workspace_path)
             return True
         except Exception:
+            log.exception("Falha ao restaurar checkpoint")
             return False

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Tela secundária de indexação:
 - planilhas abertas no Excel
@@ -9,20 +8,23 @@ Tela secundária de indexação:
 """
 from __future__ import annotations
 
+import logging
 import threading
 import tkinter as tk
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 import customtkinter as ctk
 
-from . import styles as s
 from ..indexing import (
     Workspace,
-    index_open_excel_workbooks,
     index_file_multi,
+    index_open_excel_workbooks,
     is_excel_file,
 )
+from . import styles as s
+
+log = logging.getLogger(__name__)
 
 
 class IndexerWindow(ctk.CTkToplevel):
@@ -189,6 +191,7 @@ class IndexerWindow(ctk.CTkToplevel):
             self._drop_label.dnd_bind("<<Drop>>", self._on_drop)
             self._drop_label.configure(text="Arraste e solte planilhas aqui")
         except Exception:
+            log.warning("tkinterdnd2 indisponível, drag-and-drop desativado")
             self._drop_label.configure(text="Arrastar arquivos indisponível (use Selecionar arquivos)")
 
     def _on_drop(self, event):
@@ -196,6 +199,7 @@ class IndexerWindow(ctk.CTkToplevel):
             dropped = [str(Path(p).resolve()) for p in self.tk.splitlist(event.data)]
             self._append_files(dropped)
         except Exception:
+            log.exception("Falha ao processar arquivos arrastados")
             self._status_var.set("Falha ao processar arquivos arrastados.")
 
     def _get_max_rows(self) -> int:
@@ -205,6 +209,7 @@ class IndexerWindow(ctk.CTkToplevel):
                 return 0
             return max(100, min(value, 200000))
         except Exception:
+            log.warning("Valor inválido para limite de linhas, usando padrão 5000")
             return 5000
 
     def _pick_files(self):
@@ -212,7 +217,7 @@ class IndexerWindow(ctk.CTkToplevel):
 
         paths = filedialog.askopenfilenames(
             title="Selecionar planilhas",
-            filetypes=[("Planilhas", "*.xlsx *.xlsm *.xls"), ("Todos", "*.*")],
+            filetypes=[("Planilhas", "*.xlsx *.xlsm *.xls *.ods"), ("Todos", "*.*")],
         )
         self._append_files(list(paths))
 

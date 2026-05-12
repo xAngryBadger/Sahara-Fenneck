@@ -1,4 +1,4 @@
-﻿# -*- coding: utf-8 -*-
+# -*- coding: utf-8 -*-
 """Gera imagens BMP para o Inno Setup a partir do PNG do Fennec."""
 from pathlib import Path
 from PIL import Image

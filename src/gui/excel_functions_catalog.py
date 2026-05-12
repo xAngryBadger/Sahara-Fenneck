@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Catálogo local de funções Excel para busca no Instruct Mode.
 Cada entrada: (nome, categoria, descrição_curta, palavras_chave).

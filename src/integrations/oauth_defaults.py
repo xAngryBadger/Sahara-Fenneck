@@ -1,12 +1,14 @@
-# -*- coding: utf-8 -*-
 """
 Client IDs OAuth - VOCÊ configura UMA VEZ aqui. Os usuários só clicam e fazem login.
 """
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 # =============================================================================
 # PREENCHA AQUI (uma vez) após criar OAuth apps no Google Cloud e Azure.
@@ -14,8 +16,8 @@ from pathlib import Path
 # login com email/senha normalmente. Ninguém vê ou configura Client ID.
 # Guia: docs/OAUTH-SETUP.md
 # =============================================================================
-EMBEDDED_GOOGLE_CLIENT_ID = "360568744253-87trucclv9uril38e5rrpoqu5obc9tqe.apps.googleusercontent.com"
-EMBEDDED_MICROSOFT_CLIENT_ID = "2daf589a-1687-47d4-a04f-dce92d74c6b2"
+EMBEDDED_GOOGLE_CLIENT_ID = ""
+EMBEDDED_MICROSOFT_CLIENT_ID = ""
 
 
 def _load_json_defaults() -> tuple[str, str]:
@@ -28,7 +30,8 @@ def _load_json_defaults() -> tuple[str, str]:
         root = Path(__file__).resolve().parent.parent.parent
         candidates.append(root / "oauth_defaults.json")
     except Exception:
-        pass
+        log.warning("Falha ao resolver caminho raiz do projeto para oauth_defaults.json")
+
     for p in candidates:
         if p.exists():
             try:
@@ -39,7 +42,7 @@ def _load_json_defaults() -> tuple[str, str]:
                     if g or m:
                         return g, m
             except Exception:
-                pass
+                log.warning("Falha ao carregar oauth_defaults.json de %s", p)
     return "", ""
 
 
@@ -60,8 +63,3 @@ def get_default_client_id(provider: str) -> str:
             or json_m
         )
     return ""
-
-
-def has_default_client_id(provider: str) -> bool:
-    """True se existe Client ID padrão disponível."""
-    return bool(get_default_client_id(provider))

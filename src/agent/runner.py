@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Loop ReAct do agente: chama o LLM com prompt + tools; interpreta resposta e executa
 GetData ou Optimize; repete até resposta final. Cada Optimize gera um checkpoint.
@@ -6,14 +5,21 @@ GetData ou Optimize; repete até resposta final. Cada Optimize gera um checkpoin
 from __future__ import annotations
 
 import json
+import logging
 import re
-from typing import Optional, Callable
+import time
+from collections.abc import Callable
+from functools import lru_cache
 
-from ..indexing.excel_reader import Workspace, get_workspace_summary, hydrate_workspace_full, index_from_path
 from ..checkpoints.manager import CheckpointManager
+from ..errcodes import ErrCode, err_str
+from ..indexing.excel_reader import Workspace, get_workspace_summary, hydrate_workspace_full, index_from_path
 from ..integrations import handle_integration_query
+from .llm_client import LLMClient
 from .ollama_client import OllamaClient
-from .tools import optimize_tool, structured_actions_tool
+from .tools import structured_actions_tool
+
+log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Intent classifier — keyword check to reduce spurious [ACTIONS] on read-only queries.
@@ -37,7 +43,34 @@ def _is_read_only_intent(query: str) -> bool:
 # ---------------------------------------------------------------------------
 # Sheet-name detection — "aba Vendas" => switch workspace to that sheet.
 # ---------------------------------------------------------------------------
-def _detect_sheet_name(query: str, workspace: "Workspace") -> "Optional[str]":
+@lru_cache(maxsize=32)
+def _cached_sheet_names(file_path: str) -> list[str]:
+    engine = "?"
+    try:
+        from pathlib import Path
+
+        import pandas as pd
+
+        suffix = Path(file_path).suffix.lower()
+        if suffix in (".xlsx", ".xlsm"):
+            engine = "openpyxl"
+        elif suffix == ".xls":
+            engine = "xlrd"
+        elif suffix == ".ods":
+            engine = "odf"
+        else:
+            return []
+        xl = pd.ExcelFile(file_path, engine=engine)
+        try:
+            return list(xl.sheet_names)
+        finally:
+            xl.close()
+    except Exception:
+        log.exception("Falha ao listar abas (cached, engine=%s)", engine)
+        return []
+
+
+def _detect_sheet_name(query: str, workspace: Workspace) -> str | None:
     m = re.search(
         r"(?:aba|planilha|sheet|guia)(?:\s+(?:chamada|nomeada|nome|de nome))?\s+['\"]?([A-Za-z\u00C0-\u00FF0-9_\- ]{1,40})['\"]?",
         query,
@@ -46,50 +79,34 @@ def _detect_sheet_name(query: str, workspace: "Workspace") -> "Optional[str]":
     if not m or not workspace.path:
         return None
     candidate = m.group(1).strip()
-    try:
-        import openpyxl
-        wb = openpyxl.load_workbook(workspace.path, read_only=True, data_only=True)
-        names_lower = {n.lower(): n for n in wb.sheetnames}
-        wb.close()
-        return names_lower.get(candidate.lower())
-    except Exception:
+    names = _cached_sheet_names(workspace.path)
+    if not names:
         return None
+    names_lower = {n.lower(): n for n in names}
+    return names_lower.get(candidate.lower())
 
 
 def _list_sheet_names(workspace: Workspace) -> list[str]:
     if workspace.path:
-        try:
-            import openpyxl
-            wb = openpyxl.load_workbook(workspace.path, read_only=True, data_only=True)
-            names = list(wb.sheetnames)
-            wb.close()
-            return names
-        except Exception:
-            pass
+        cached = _cached_sheet_names(workspace.path)
+        if cached:
+            return cached
 
     if workspace.excel_live and workspace.excel_book_name:
-        pythoncom = None
         try:
-            import pythoncom  # type: ignore
-            import win32com.client  # type: ignore
-            pythoncom.CoInitialize()
-            excel = win32com.client.GetActiveObject("Excel.Application")
-            for wb in excel.Workbooks:
-                if str(getattr(wb, "Name", "")).lower() == workspace.excel_book_name.lower():
+            from ..com_utils import COMContext
+
+            with COMContext() as ctx:
+                wb = ctx.resolve_workbook(path=workspace.path, name=workspace.excel_book_name)
+                if wb is not None:
                     return [str(s.Name) for s in wb.Worksheets]
         except Exception:
-            return []
-        finally:
-            if pythoncom is not None:
-                try:
-                    pythoncom.CoUninitialize()
-                except Exception:
-                    pass
+            log.exception("Falha ao listar abas via COM/Excel")
 
     return []
 
 
-def _handle_sheet_query(query: str, workspace: Workspace) -> Optional[str]:
+def _handle_sheet_query(query: str, workspace: Workspace) -> str | None:
     q = (query or "").lower()
     if not any(word in q for word in ("aba", "abas", "sheet", "planilha", "guia")):
         return None
@@ -124,7 +141,7 @@ def _switch_workspace_to_sheet(query: str, workspace: Workspace) -> Workspace:
             if not alt.error:
                 return alt
         except Exception:
-            pass
+            log.exception("Falha ao trocar contexto para aba alternativa")
     return workspace
 
 
@@ -147,6 +164,14 @@ Ações disponíveis:
 - drop_columns: {"action":"drop_columns","columns":["Col1"]}
 - add_computed_column: {"action":"add_computed_column","new_column":"Total","operation":"sum","source_columns":["A","B"]}
 - filter_equals: {"action":"filter_equals","column":"Col","value":"X"}
+- filter_contains: {"action":"filter_contains","column":"Col","value":"texto","case_sensitive":false}
+- filter_range: {"action":"filter_range","column":"Col","min":10,"max":100}
+- dropna: {"action":"dropna","columns":["Col1"],"how":"any"} ou {"action":"dropna"} (todas as colunas)
+- groupby_agg: {"action":"groupby_agg","group_by":["Categoria"],"agg_column":"Valor","agg_func":"sum"}
+- pivot_table: {"action":"pivot_table","index":["Cat"],"columns":["Ano"],"values":"Vendas","agg_func":"sum"}
+- merge_columns: {"action":"merge_columns","columns":["Nome","Sobrenome"],"new_column":"Nome Completo","separator":" "}
+- strip_whitespace: {"action":"strip_whitespace","columns":["Col1"]} ou {"action":"strip_whitespace"} (todas as colunas texto)
+- change_dtype: {"action":"change_dtype","column":"CEP","dtype":"str"} (tipos: int, float, str, bool, datetime)
 - duplicate_sheet: {"action":"duplicate_sheet","name":"Nome da nova aba"}
 - create_sheet: {"action":"create_sheet","name":"Nome da nova aba"}
 - delete_sheet: {"action":"delete_sheet","name":"Nome da aba a excluir"}
@@ -155,21 +180,21 @@ Ações disponíveis:
 Use os nomes exatos das colunas fornecidas. Nunca invente colunas. Apenas uma ferramenta por resposta."""
 
 
-def _extract_optimize(code_text: str) -> Optional[str]:
+def _extract_optimize(code_text: str) -> str | None:
     m = re.search(r"\[OPTIMIZE\]\s*(.*?)\s*\[/OPTIMIZE\]", code_text, re.DOTALL | re.IGNORECASE)
     if m:
         return m.group(1).strip()
     return None
 
 
-def _extract_actions(code_text: str) -> Optional[str]:
+def _extract_actions(code_text: str) -> str | None:
     m = re.search(r"\[ACTIONS\]\s*(.*?)\s*\[/ACTIONS\]", code_text, re.DOTALL | re.IGNORECASE)
     if m:
         return m.group(1).strip()
     return None
 
 
-def _extract_loose_actions(code_text: str) -> Optional[str]:
+def _extract_loose_actions(code_text: str) -> str | None:
     """Accept raw/fenced JSON when smaller models forget [ACTIONS] tags."""
     text = (code_text or "").strip()
     if not text:
@@ -199,6 +224,7 @@ def _extract_loose_actions(code_text: str) -> Optional[str]:
         try:
             raw = json.loads(candidate)
         except Exception:
+            log.exception("Falha ao analisar JSON de acoes soltas")
             continue
 
         if isinstance(raw, dict) and isinstance(raw.get("actions"), list) and raw.get("actions"):
@@ -231,6 +257,7 @@ def _summarize_actions(actions_payload: str, workspace: Workspace) -> str:
         raw = json.loads(actions_payload)
         actions = raw.get("actions", []) if isinstance(raw, dict) else raw
     except Exception:
+        log.exception("Falha ao analisar JSON do bloco ACTIONS para resumo")
         return (
             f"A planilha `{workspace.workbook_name}` / aba `{workspace.sheet_name}` sera alterada.\n\n"
             "Nao foi possivel montar a previa detalhada das acoes, mas o agente tentou executar um bloco [ACTIONS]."
@@ -253,7 +280,15 @@ def _summarize_actions(actions_payload: str, workspace: Workspace) -> str:
         "rename_column": "Renomear coluna",
         "drop_columns": "Remover colunas",
         "add_computed_column": "Criar coluna calculada",
-        "filter_equals": "Filtrar linhas por valor",
+        "filter_equals": "Filtrar linhas por valor exato",
+        "filter_contains": "Filtrar linhas por texto",
+        "filter_range": "Filtrar linhas por intervalo",
+        "dropna": "Remover linhas com valores vazios",
+        "groupby_agg": "Agrupar e agregar",
+        "pivot_table": "Tabela dinâmica",
+        "merge_columns": "Mesclar colunas",
+        "strip_whitespace": "Remover espaços extras",
+        "change_dtype": "Alterar tipo de dados",
         "duplicate_sheet": "Duplicar aba",
         "create_sheet": "Criar nova aba",
         "delete_sheet": "Excluir aba",
@@ -279,26 +314,13 @@ def _summarize_actions(actions_payload: str, workspace: Workspace) -> str:
     return "\n".join(lines)
 
 
-def _summarize_optimize(code: str, workspace: Workspace) -> str:
-    snippet = code.strip()
-    if len(snippet) > 700:
-        snippet = snippet[:700].rstrip() + "\n..."
-    return (
-        f"Planilha: {workspace.workbook_name or workspace.path}\n"
-        f"Aba ativa: {workspace.sheet_name}\n\n"
-        "O agente quer executar uma transformacao personalizada na planilha:\n\n"
-        f"{snippet}\n\n"
-        "Ao confirmar, o Fennec criara um checkpoint antes da primeira alteracao."
-    )
-
-
 def run_agent(
     query: str,
     workspace: Workspace,
-    ollama: Optional[OllamaClient] = None,
-    on_message: Optional[Callable[[str], None]] = None,
-    on_checkpoint: Optional[Callable[[str], None]] = None,
-    on_confirm_change: Optional[Callable[[str], bool]] = None,
+    client: LLMClient | None = None,
+    on_message: Callable[[str], None] | None = None,
+    on_checkpoint: Callable[[str], None] | None = None,
+    on_confirm_change: Callable[[str], bool] | None = None,
     max_steps: int = 5,
 ) -> str:
     """
@@ -311,19 +333,17 @@ def run_agent(
             on_message(direct_sheet_reply)
         return direct_sheet_reply
 
-    # Fast path: purely informational queries don't need tool scaffolding.
-    # The system prompt already instructs the model, but this guard reduces
-    # accidental [ACTIONS] output from smaller models on read-only questions.
     if _is_read_only_intent(query) and not workspace.error:
-        # If user references a specific sheet, switch context
+        t0 = time.monotonic()
         switched = _switch_workspace_to_sheet(query, workspace)
         if switched is not workspace:
             workspace = switched
-        client = ollama or OllamaClient()
+        client = client or OllamaClient()
         if client.is_available():
             data_summary = get_workspace_summary(workspace)
             ro_prompt = f"Dados da planilha:\n{data_summary}\n\nPergunta: {query}"
             response = client.generate(ro_prompt, system=SYSTEM)
+            log.info("[perf] read-only path: %.2fs", time.monotonic() - t0)
             clean = re.sub(r"\[/?(?:ACTIONS|OPTIMIZE)\]", "", response).strip()
             if clean:
                 if on_message:
@@ -331,13 +351,15 @@ def run_agent(
                 return clean
 
     if workspace.error:
-        msg = f"Nenhuma planilha indexada: {workspace.error}"
+        msg = err_str(ErrCode.WORKSPACE_ERROR, workspace.error or "")
         if on_message:
             on_message(msg)
         return msg
 
-    # Garante visão completa da aba para reduzir perda de contexto por truncamento.
+    t_start = time.monotonic()
+
     refreshed = hydrate_workspace_full(workspace)
+    t_hydrate = time.monotonic() - t_start
     if refreshed is not workspace:
         workspace.path = refreshed.path
         workspace.workbook_name = refreshed.workbook_name
@@ -351,19 +373,17 @@ def run_agent(
         workspace.excel_book_name = refreshed.excel_book_name
         workspace.error = refreshed.error
 
-    # Switch context if user explicitly references a different sheet
     workspace = _switch_workspace_to_sheet(query, workspace)
 
-    # v2: algumas intencoes vao direto para integracoes externas
-    integration_reply = handle_integration_query(query, workspace)
-    if integration_reply is not None:
-        if on_message:
-            on_message(integration_reply)
-        return integration_reply
-
-    client = ollama or OllamaClient()
+    client = client or OllamaClient()
     if not client.is_available():
-        msg = "Não consegui inicializar o Ollama automaticamente. Verifique se o Ollama está instalado e tente abrir o Fennec novamente."
+        if not _MODIFY_SIGNALS.search(query):
+            integration_reply = handle_integration_query(query, workspace)
+            if integration_reply is not None:
+                if on_message:
+                    on_message(integration_reply)
+                return integration_reply
+        msg = err_str(ErrCode.OLLAMA_UNAVAILABLE, "Verifique se o Ollama está instalado e tente abrir o Fennec novamente.")
         if on_message:
             on_message(msg)
         return msg
@@ -383,9 +403,15 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
     messages = [prompt]
     final_answer = ""
     checkpoint_saved_for_order = False
+    t_llm_elapsed = 0.0
+    t_tool_elapsed = 0.0
+    last_step = 0
 
     for step in range(max_steps):
+        last_step = step
+        t_llm = time.monotonic()
         response = client.generate("\n\n".join(messages), system=SYSTEM)
+        t_llm_elapsed = time.monotonic() - t_llm
 
         actions_payload = _extract_actions(response) or _extract_loose_actions(response)
         if actions_payload:
@@ -401,6 +427,7 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
                     messages.append("Resultado: A lista de ações estava vazia. Gere ações válidas.")
                     continue
             except Exception:
+                log.exception("Falha ao validar lista de acoes")
                 pass
 
             if on_confirm_change:
@@ -413,6 +440,7 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
                     break
 
             save_checkpoint_now = not checkpoint_saved_for_order
+            t_tool = time.monotonic()
             result = structured_actions_tool(
                 workspace,
                 actions_payload,
@@ -420,58 +448,36 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
                 on_checkpoint_saved=on_checkpoint if save_checkpoint_now else None,
                 save_checkpoint=save_checkpoint_now,
             )
-            if save_checkpoint_now and not result.lower().startswith("erro ao salvar checkpoint"):
+            t_tool_elapsed = time.monotonic() - t_tool
+            if save_checkpoint_now and result.success:
                 checkpoint_saved_for_order = True
 
-            if "sucesso" in result.lower():
+            if result.success:
                 clean_text = _strip_tool_payload_from_response(response, actions_payload, "ACTIONS")
-                final_answer = (clean_text + "\n\n" + result).strip()
+                final_answer = (clean_text + "\n\n" + result.message).strip()
                 if on_message:
                     on_message(final_answer)
                 break
 
             # Tool failed — let LLM retry with the error
             if on_message:
-                on_message(f"Não foi possível aplicar: {result}")
+                on_message(f"Não foi possível aplicar: {result.message}")
             messages.append(response)
-            messages.append(f"Resultado da ferramenta ACTIONS: {result}")
+            messages.append(f"Resultado da ferramenta ACTIONS: {result.message}")
             continue
 
         code = _extract_optimize(response)
         if code:
-            if on_confirm_change:
-                preview = _summarize_optimize(code, workspace)
-                approved = on_confirm_change(preview)
-                if not approved:
-                    final_answer = "Operacao cancelada. Nenhuma alteracao foi aplicada na planilha."
-                    if on_message:
-                        on_message(final_answer)
-                    break
-
-            save_checkpoint_now = not checkpoint_saved_for_order
-            result = optimize_tool(
-                workspace,
-                code,
-                cp,
-                on_checkpoint_saved=on_checkpoint if save_checkpoint_now else None,
-                save_checkpoint=save_checkpoint_now,
+            final_answer = err_str(
+                ErrCode.OPTIMIZE_DEPRECATED,
+                "A ferramenta [OPTIMIZE] foi removida por questões de segurança (exec()). "
+                "Por favor, reformule a operação usando [ACTIONS] com ações declarativas "
+                "(sort, fillna, replace, rename_column, drop_columns, add_computed_column, "
+                "filter_equals, dropna, groupby_agg, etc.).",
             )
-            if save_checkpoint_now and not result.lower().startswith("erro ao salvar checkpoint"):
-                checkpoint_saved_for_order = True
-
-            if "sucesso" in result.lower():
-                clean_text = re.sub(r"\[/?(?:ACTIONS|OPTIMIZE)\]", "", response.split("[OPTIMIZE]")[0]).strip()
-                final_answer = (clean_text + "\n\n" + result).strip()
-                if on_message:
-                    on_message(final_answer)
-                break
-
-            # Tool failed — let LLM retry with the error
             if on_message:
-                on_message(f"Não foi possível aplicar: {result}")
-            messages.append(response)
-            messages.append(f"Resultado da ferramenta Optimize: {result}")
-            continue
+                on_message(final_answer)
+            break
 
         # No tool block: this is the final answer
         final_answer = response
@@ -483,5 +489,10 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
         final_answer = "Nenhuma resposta gerada."
         if on_message:
             on_message(final_answer)
+
+    log.info(
+        "[perf] run_agent total=%.2fs hydrate=%.2fs llm=%.2fs tool=%.2fs step=%d",
+        time.monotonic() - t_start, t_hydrate, t_llm_elapsed, t_tool_elapsed, last_step,
+    )
 
     return final_answer

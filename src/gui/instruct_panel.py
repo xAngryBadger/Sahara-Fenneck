@@ -1,15 +1,14 @@
-# -*- coding: utf-8 -*-
 """
 Painel do Instruct Mode — ações rápidas + busca de funções Excel.
 Substitui os SideButtons quando o modo Instruct está ativo.
 """
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import customtkinter as ctk
-from typing import Callable
 
 from . import styles as s
-
 
 # Ações rápidas: (rótulo do botão, prefixo enviado ao agente)
 QUICK_ACTIONS: list[tuple[str, str]] = [

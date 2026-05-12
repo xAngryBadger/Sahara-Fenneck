@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 """
 Bolha de chat do Fennec -- avatar circular (cabecinha) + bolha macia.
 """
 import customtkinter as ctk
+
 from . import styles as s
 
 
@@ -12,7 +12,7 @@ class FennecBubble(ctk.CTkFrame):
     def __init__(self, parent, text: str, avatar_image=None, **kwargs):
         super().__init__(parent, fg_color="transparent", **kwargs)
         self._avatar = avatar_image
-        self._label = None
+        self._label: ctk.CTkLabel | None = None
         self._build(text)
         self.bind("<Configure>", self._update_wrap)
 
@@ -62,7 +62,7 @@ class UserBubble(ctk.CTkFrame):
 
     def __init__(self, parent, text: str, **kwargs):
         super().__init__(parent, fg_color="transparent", **kwargs)
-        self._label = None
+        self._label: ctk.CTkLabel | None = None
         bubble = ctk.CTkFrame(
             self,
             fg_color=s.BUBBLE_BG,

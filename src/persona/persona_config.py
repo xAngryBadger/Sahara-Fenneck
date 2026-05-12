@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Persona configurável para o agente (Fennec padrão; depois outros temas).
 """

@@ -1,35 +1,35 @@
-# -*- coding: utf-8 -*-
 """
 Sahara Fennec - Janela principal (UI + backend integrado).
 """
+import logging
 import tkinter as tk
 from pathlib import Path
-import threading
-import subprocess
 
 import customtkinter as ctk
 
-from . import styles as s
-from .side_buttons import SideButtons
-from .instruct_panel import InstructPanel
-from .input_bar import InputBar
-from .chat_bubbles import FennecBubble, UserBubble
-from .gradient import draw_vertical_gradient
-from .indexer_window import IndexerWindow
-
-from ..indexing import Workspace
 from ..checkpoints import CheckpointManager
 from ..config import load_settings, save_settings
+from ..indexing import Workspace
+from . import styles as s
+from .chat_controller import ChatController
+from .constants import APP_VERSION, DEFAULT_MODEL
+from .gradient import draw_vertical_gradient
+from .indexer_window import IndexerWindow
+from .input_bar import InputBar
+from .instruct_panel import InstructPanel
+from .settings_controller import SettingsController
+from .side_buttons import SideButtons
+from .workspace_manager import WorkspaceManager
+
+log = logging.getLogger(__name__)
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 _ASSETS = _PROJECT_ROOT / "assets"
 _BG_CANDIDATES = [
-    _PROJECT_ROOT / "fundodeserto.png",  # prioridade: arquivo na raiz (pedido do usuário)
+    _PROJECT_ROOT / "fundodeserto.png",
     _ASSETS / "fundodeserto.png",
     _ASSETS / "desert_bg.png",
 ]
-DEFAULT_MODEL = "qwen2.5:7b"
-APP_VERSION = "2.0"
 
 
 def _ctk_img(path: Path, size: tuple[int, int]):
@@ -42,16 +42,15 @@ def _ctk_img(path: Path, size: tuple[int, int]):
             size=size,
         )
     except Exception:
+        log.exception("Falha ao carregar imagem: %s", path)
         return None
 
 
 class MainWindow:
     def __init__(self, persona: dict):
         self.persona = persona
-        self._imgs = {}
-        self._workspaces: dict[str, Workspace] = {}
-        self._active_key: str | None = None
-        self._last_fennec_message = ""
+        self._imgs: dict[str, object] = {}
+        self._ws = WorkspaceManager()
         self._pinned = False
         self._instruct_mode = False
         self._indexer_window = None
@@ -67,6 +66,10 @@ class MainWindow:
         self._model_name = tk.StringVar(master=self.root, value=str(cfg.get("model", DEFAULT_MODEL)))
         self._include_all_sheets = tk.BooleanVar(master=self.root, value=bool(cfg.get("index_all_sheets", False)))
         self._max_rows_per_sheet = tk.IntVar(master=self.root, value=int(cfg.get("max_rows_per_sheet", 0)))
+        self._llm_backend = tk.StringVar(master=self.root, value=str(cfg.get("llm_backend", "ollama")))
+        self._nim_base_url = tk.StringVar(master=self.root, value=str(cfg.get("nim_base_url", "https://integrate.api.nvidia.com/v1")))
+        self._nim_model = tk.StringVar(master=self.root, value=str(cfg.get("nim_model", "meta/llama-3.1-70b-instruct")))
+        self._nim_api_key = tk.StringVar(master=self.root)
         self.root.minsize(s.WINDOW_MIN_WIDTH, s.WINDOW_MIN_HEIGHT)
         self.root.geometry(f"{s.WINDOW_DEFAULT_WIDTH}x{s.WINDOW_DEFAULT_HEIGHT}")
         self.root.configure(fg_color=s.BG_WARM)
@@ -74,6 +77,26 @@ class MainWindow:
         self._load_assets()
         self._set_icon()
         self._build()
+        self._chat = ChatController(
+            root=self.root,
+            chat_scroll=self._chat_scroll,
+            status_var=self.status_var,
+            input_bar=self.input_bar,
+            images=self._imgs,
+            on_workspace_status=self._workspace_status,
+        )
+        self._settings = SettingsController(
+            root=self.root,
+            status_var=self.status_var,
+            model_name_var=self._model_name,
+            include_all_sheets_var=self._include_all_sheets,
+            max_rows_var=self._max_rows_per_sheet,
+            llm_backend_var=self._llm_backend,
+            nim_base_url_var=self._nim_base_url,
+            nim_model_var=self._nim_model,
+            on_save_settings=self._save_current_settings,
+        )
+        self._reset_chat()
         self.root.after(800, self._check_pending_models)
 
     def _load_assets(self):
@@ -88,13 +111,13 @@ class MainWindow:
             try:
                 models = [m.strip() for m in pending.read_text(encoding="utf-8").splitlines() if m.strip()]
                 if models:
-                    self._add_fennec_bubble(
+                    self._chat.add_fennec_bubble(
                         f"⏳ O modelo de IA ({', '.join(models)}) ainda está sendo baixado em segundo plano. "
                         "Isso pode levar alguns minutos dependendo da sua conexão. "
                         "Você poderá usar o app normalmente assim que o download for concluído."
                     )
             except Exception:
-                pass
+                log.exception("Falha ao verificar modelos pendentes")
 
     def _set_icon(self):
         ico = _ASSETS / "fennec_head_icon.ico"
@@ -102,7 +125,7 @@ class MainWindow:
             try:
                 self.root.iconbitmap(str(ico))
             except Exception:
-                pass
+                log.exception("Falha ao definir ícone da janela")
 
     def _draw_bg(self, _ev=None):
         self._bg.delete("all")
@@ -163,7 +186,6 @@ class MainWindow:
         self._chat_scroll = ctk.CTkScrollableFrame(left, fg_color="transparent", height=180)
         self._chat_scroll.pack(fill="both", expand=True, pady=(0, 8))
         self._hide_scrollbar(self._chat_scroll)
-        self._reset_chat()
 
         # Botões laterais (modo Chat — padrão)
         self._side_buttons = SideButtons(
@@ -223,15 +245,9 @@ class MainWindow:
             try:
                 sb.grid_remove()
             except Exception:
-                pass
+                log.exception("Falha ao ocultar scrollbar")
         except Exception:
-            pass
-
-    def _scroll_chat_bottom(self):
-        try:
-            self.root.after(10, lambda: self._chat_scroll._parent_canvas.yview_moveto(1.0))
-        except Exception:
-            pass
+            log.exception("Falha ao acessar scrollbar interno do CTkScrollableFrame")
 
     def _reset_chat(self):
         for child in self._chat_scroll.winfo_children():
@@ -241,37 +257,28 @@ class MainWindow:
             "welcome_message",
             "Olá! Eu sou Fennec Excel, seu agente pessoal de planilhas!",
         )
-        self._last_fennec_message = ""
-        self._add_fennec_bubble(welcome)
-        self._add_fennec_bubble(
+        self._chat.reset_last_message()
+        self._chat.add_fennec_bubble(welcome)
+        self._chat.add_fennec_bubble(
             "Use 'Indexar Agora' na lateral para abrir a tela de indexação e escolher uma ou múltiplas planilhas/abas."
         )
 
-    def _workspace_key(self, ws: Workspace) -> str:
-        book = ws.workbook_name or Path(ws.path).name or "Planilha"
-        return f"{book} :: {ws.sheet_name}"
-
     def _active_workspace(self) -> Workspace | None:
-        if not self._workspaces:
-            return None
-        if self._active_key and self._active_key in self._workspaces:
-            return self._workspaces[self._active_key]
-        self._active_key = next(iter(self._workspaces.keys()))
-        return self._workspaces[self._active_key]
+        return self._ws.active()
 
     def _workspace_status(self) -> str:
-        active = self._active_workspace()
-        if not active:
-            return "Pronto  |  Nenhuma planilha indexada"
-        return f"{active.summary_one_line()} | sessão: {len(self._workspaces)} item(ns)"
+        return self._ws.status_text()
 
     def _save_current_settings(self, extra: dict | None = None):
         payload = load_settings()
         payload.update(
             {
-            "model": self._model_name.get().strip() or DEFAULT_MODEL,
-            "index_all_sheets": bool(self._include_all_sheets.get()),
-            "max_rows_per_sheet": int(self._max_rows_per_sheet.get()),
+                "model": self._model_name.get().strip() or DEFAULT_MODEL,
+                "index_all_sheets": bool(self._include_all_sheets.get()),
+                "max_rows_per_sheet": int(self._max_rows_per_sheet.get()),
+                "llm_backend": self._llm_backend.get().strip(),
+                "nim_base_url": self._nim_base_url.get().strip(),
+                "nim_model": self._nim_model.get().strip(),
             }
         )
         if extra:
@@ -287,7 +294,7 @@ class MainWindow:
                     self._indexer_window.focus()
                     return
             except Exception:
-                pass
+                log.exception("Falha ao verificar existência da janela do indexador")
 
         self._indexer_window = IndexerWindow(
             self.root,
@@ -304,174 +311,31 @@ class MainWindow:
         ok = 0
         errs = []
         for ws in workspaces:
-            if ws.error:
+            key, has_err = self._ws.add(ws)
+            if has_err:
                 errs.append(f"{ws.workbook_name or ws.path}: {ws.error}")
-                continue
-            key = self._workspace_key(ws)
-            self._workspaces[key] = ws
-            self._active_key = key
-            ok += 1
+            else:
+                ok += 1
 
         if ok > 0:
-            self._add_fennec_bubble(f"Indexação concluída: {ok} aba(s) carregada(s). Planilha ativa: {self._active_key}.")
+            self._chat.add_fennec_bubble(f"Indexação concluída: {ok} aba(s) carregada(s). Planilha ativa: {self._ws.active_key}.")
         if errs:
-            self._add_fennec_bubble("Algumas indexações falharam:\n- " + "\n- ".join(errs[:4]))
+            self._chat.add_fennec_bubble("Algumas indexações falharam:\n- " + "\n- ".join(errs[:4]))
 
         self.status_var.set(self._workspace_status())
 
     # Chat / agente
 
     def _on_send(self, text: str):
-        text = text.strip()
-        if not text:
-            return
-
-        ws = self._active_workspace()
-        if ws is None or ws.error:
-            self._add_fennec_bubble("Indexe ao menos uma planilha antes de enviar consultas.")
-            return
-
-        self._add_user_bubble(text)
-        self.status_var.set("Processando...")
-        self.input_bar.entry.configure(state="disabled")
-
-        model_name = self._model_name.get().strip() or DEFAULT_MODEL
-
-        def run():
-            try:
-                from src.agent.runner import run_agent
-                from src.agent.ollama_client import OllamaClient
-
-                client = OllamaClient(model=model_name)
-
-                def on_msg(msg: str):
-                    self.root.after(0, lambda m=msg: self._add_fennec_bubble(m))
-
-                def on_cp(label: str):
-                    self.root.after(0, lambda: self.status_var.set(f"Checkpoint salvo: {label}"))
-
-                def on_confirm(preview: str) -> bool:
-                    return self._confirm_change_blocking(preview)
-
-                run_agent(
-                    text,
-                    ws,
-                    ollama=client,
-                    on_message=on_msg,
-                    on_checkpoint=on_cp,
-                    on_confirm_change=on_confirm,
-                )
-                self.root.after(0, self._agent_done)
-            except Exception as e:
-                self.root.after(0, lambda: self._agent_done(error=f"Erro: {e!s}"))
-
-        threading.Thread(target=run, daemon=True).start()
-
-    def _agent_done(self, error: str | None = None):
-        self.input_bar.entry.configure(state="normal")
-        if error:
-            self._add_fennec_bubble(error)
-        self.status_var.set(self._workspace_status())
-
-    def _add_user_bubble(self, text: str):
-        UserBubble(self._chat_scroll, text).pack(anchor="e", fill="x", pady=(0, 6), padx=(0, 10))
-        self._scroll_chat_bottom()
-
-    def _add_fennec_bubble(self, text: str):
-        clean = (text or "").strip()
-        if not clean:
-            return
-        # Evita mensagens duplicadas consecutivas
-        if clean == self._last_fennec_message:
-            return
-        self._last_fennec_message = clean
-
-        FennecBubble(self._chat_scroll, clean, avatar_image=self._imgs.get("head_avatar")).pack(
-            anchor="w", fill="x", pady=(0, 6), padx=(0, 10)
+        self._chat.send(
+            text=text,
+            ws=self._active_workspace(),
+            model_name=self._model_name.get(),
+            llm_backend=self._llm_backend.get(),
+            nim_base_url=self._nim_base_url.get(),
+            nim_model=self._nim_model.get(),
+            on_confirm_change=self._chat.confirm_change_blocking,
         )
-        self._scroll_chat_bottom()
-
-    def _confirm_change_blocking(self, preview_text: str) -> bool:
-        """Exibe uma modal de preview/confirmacao no thread da UI e aguarda a decisao."""
-        decision = threading.Event()
-        result = {"approved": False}
-
-        def show_dialog():
-            self.status_var.set("Aguardando confirmacao para alterar a planilha...")
-
-            win = ctk.CTkToplevel(self.root)
-            win.title(f"Confirmar alteracao - Sahara Fennec {APP_VERSION}")
-            win.geometry("760x520")
-            win.transient(self.root)
-            win.configure(fg_color=s.BG_WARM)
-
-            ctk.CTkLabel(
-                win,
-                text="Revise a previa antes de alterar a planilha",
-                font=ctk.CTkFont(family=s.FONT_FAMILY, size=16, weight="bold"),
-                text_color=s.DARK_TEXT,
-                fg_color="transparent",
-            ).pack(anchor="w", padx=14, pady=(14, 6))
-
-            ctk.CTkLabel(
-                win,
-                text="Se confirmar, o Fennec aplica a ordem e salva checkpoint automatico antes da primeira alteracao.",
-                text_color=s.MUTED_TEXT,
-                fg_color="transparent",
-                wraplength=720,
-                justify="left",
-            ).pack(anchor="w", padx=14, pady=(0, 10))
-
-            box = ctk.CTkTextbox(
-                win,
-                wrap="word",
-                fg_color=s.INPUT_BG,
-                border_color=s.INPUT_BORDER,
-                text_color=s.DARK_TEXT,
-            )
-            box.pack(fill="both", expand=True, padx=14, pady=(0, 12))
-            box.insert("1.0", preview_text)
-            box.configure(state="disabled")
-
-            footer = ctk.CTkFrame(win, fg_color="transparent")
-            footer.pack(fill="x", padx=14, pady=(0, 14))
-
-            btn_style = dict(
-                fg_color=s.ACTION_BG,
-                text_color=s.ACTION_TEXT,
-                border_width=1,
-                border_color=s.ACTION_BORDER,
-                hover_color=s.ACTION_HOVER,
-            )
-
-            def approve():
-                result["approved"] = True
-                decision.set()
-                win.destroy()
-
-            def reject():
-                result["approved"] = False
-                decision.set()
-                win.destroy()
-
-            ctk.CTkButton(footer, text="Cancelar", width=110, command=reject, **btn_style).pack(side="right")
-            ctk.CTkButton(footer, text="Confirmar", width=110, command=approve, **btn_style).pack(side="right", padx=(0, 8))
-
-            win.protocol("WM_DELETE_WINDOW", reject)
-            try:
-                win.grab_set()
-                win.focus()
-            except Exception:
-                pass
-
-        self.root.after(0, show_dialog)
-        decision.wait()
-
-        if result["approved"]:
-            self.root.after(0, lambda: self.status_var.set("Confirmado. Aplicando alteracoes..."))
-        else:
-            self.root.after(0, lambda: self.status_var.set("Alteracao cancelada pelo usuario."))
-        return bool(result["approved"])
 
     # Sessão / workspaces
 
@@ -500,29 +364,27 @@ class MainWindow:
         box = ctk.CTkScrollableFrame(win, fg_color="transparent")
         box.pack(fill="both", expand=True, padx=10, pady=6)
 
-        if not self._workspaces:
+        ws_items = self._ws.items()
+        if not ws_items:
             ctk.CTkLabel(box, text="Nenhuma planilha indexada.", fg_color="transparent", text_color=s.MUTED_TEXT).pack(
                 anchor="w"
             )
 
-        for key, ws in self._workspaces.items():
+        for key, ws in ws_items:
             row = ctk.CTkFrame(box, fg_color="transparent")
             row.pack(fill="x", pady=3)
 
-            tag = " (ativa)" if key == self._active_key else ""
+            tag = " (ativa)" if key == self._ws.active_key else ""
             ctk.CTkLabel(row, text=f"{key}{tag}", fg_color="transparent", text_color=s.DARK_TEXT).pack(side="left")
 
             def do_activate(k=key, w=win):
-                self._active_key = k
+                self._ws.set_active(k)
                 self.status_var.set(self._workspace_status())
-                self._add_fennec_bubble(f"Planilha ativa alterada para: {k}")
+                self._chat.add_fennec_bubble(f"Planilha ativa alterada para: {k}")
                 w.destroy()
 
             def do_remove(k=key, w=win):
-                if k in self._workspaces:
-                    del self._workspaces[k]
-                if self._active_key == k:
-                    self._active_key = None
+                self._ws.remove(k)
                 self.status_var.set(self._workspace_status())
                 w.destroy()
                 self._on_multiplanilhas()
@@ -539,11 +401,10 @@ class MainWindow:
         ctk.CTkButton(footer, text="Fechar", command=win.destroy, **_btn_style).pack(side="right")
 
     def _on_new_session(self):
-        self._workspaces.clear()
-        self._active_key = None
-        self._last_fennec_message = ""
+        self._ws.clear()
+        self._chat.reset_last_message()
         self._reset_chat()
-        self.status_var.set("Pronto  |  Sessão reiniciada")
+        self.status_var.set("Pronto | Sessão reiniciada")
 
     # Top controls
 
@@ -552,7 +413,7 @@ class MainWindow:
         try:
             self.root.attributes("-topmost", self._pinned)
         except Exception:
-            pass
+            log.exception("Falha ao alternar atributo topmost (pin)")
         self._pin_btn.configure(text="Unpin" if self._pinned else "Pin")
 
     def _toggle_instruct_mode(self):
@@ -567,45 +428,24 @@ class MainWindow:
             self._mode_btn.configure(text="Instruct")
 
     def _on_function_ask(self, query: str):
-        """Usuário pediu ao agente para sugerir funções Excel."""
         ws = self._active_workspace()
         if ws is None or ws.error:
-            self._add_fennec_bubble("Indexe ao menos uma planilha antes de perguntar sobre funções.")
+            self._chat.add_fennec_bubble("Indexe ao menos uma planilha antes de perguntar sobre funções.")
             return
 
-        # Show only the user's query in chat, not the system prefix
-        self._add_user_bubble(query)
-        self.status_var.set("Processando...")
-        self.input_bar.entry.configure(state="disabled")
-
-        model_name = self._model_name.get().strip() or DEFAULT_MODEL
         full = (
             f"O usuário quer saber quais funções do Excel podem ajudá-lo com: {query}\n"
             "Liste de 2 a 5 funções relevantes do Excel (nome em português e inglês), "
             "com uma explicação curta de cada. Não aplique nenhuma mudança na planilha."
         )
-
-        def run():
-            try:
-                from src.agent.runner import run_agent
-                from src.agent.ollama_client import OllamaClient
-
-                client = OllamaClient(model=model_name)
-
-                def on_msg(msg: str):
-                    self.root.after(0, lambda m=msg: self._add_fennec_bubble(m))
-
-                run_agent(
-                    full,
-                    ws,
-                    ollama=client,
-                    on_message=on_msg,
-                )
-                self.root.after(0, self._agent_done)
-            except Exception as e:
-                self.root.after(0, lambda: self._agent_done(error=f"Erro: {e!s}"))
-
-        threading.Thread(target=run, daemon=True).start()
+        self._chat.send(
+            text=full,
+            ws=ws,
+            model_name=self._model_name.get(),
+            llm_backend=self._llm_backend.get(),
+            nim_base_url=self._nim_base_url.get(),
+            nim_model=self._nim_model.get(),
+        )
 
     def _on_checkpoints(self):
         ws = self._active_workspace()
@@ -649,222 +489,8 @@ class MainWindow:
 
         ctk.CTkButton(win, text="Fechar", command=win.destroy, **_btn_style).pack(pady=6)
 
-    def _recommended_model(self) -> tuple[str, str]:
-        """Sugestão simples por RAM/VRAM disponível."""
-        ram_gb = 0.0
-        vram_gb = 0.0
-
-        try:
-            import psutil
-
-            ram_gb = psutil.virtual_memory().total / (1024 ** 3)
-        except Exception:
-            pass
-
-        try:
-            out = subprocess.check_output(
-                ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
-                stderr=subprocess.DEVNULL,
-                text=True,
-            )
-            vals = [float(x.strip()) / 1024.0 for x in out.splitlines() if x.strip()]
-            if vals:
-                vram_gb = max(vals)
-        except Exception:
-            vram_gb = 0.0
-
-        if ram_gb >= 24 and vram_gb >= 10:
-            return "qwen2.5:14b", f"RAM ~{ram_gb:.1f}GB, VRAM ~{vram_gb:.1f}GB"
-        if ram_gb >= 16 and vram_gb >= 6:
-            return "qwen2.5:7b", f"RAM ~{ram_gb:.1f}GB, VRAM ~{vram_gb:.1f}GB"
-        return "qwen2.5:3b", f"RAM ~{ram_gb:.1f}GB, VRAM ~{vram_gb:.1f}GB"
-
     def _on_settings(self):
-        from ..integrations import connect_provider, disconnect_provider, provider_status
-        from ..integrations.oauth_defaults import get_default_client_id
-
-        cfg = load_settings()
-        win = ctk.CTkToplevel(self.root)
-        win.title(f"Configurações - Sahara Fennec {APP_VERSION}")
-        win.geometry("540x620")
-        win.transient(self.root)
-        win.configure(fg_color=s.BG_WARM)
-
-        rec_model, rec_hint = self._recommended_model()
-
-        body = ctk.CTkScrollableFrame(win, fg_color="transparent")
-        body.pack(fill="both", expand=True, padx=12, pady=12)
-
-        ctk.CTkLabel(body, text="Modelo Ollama", fg_color="transparent", text_color=s.DARK_TEXT).pack(anchor="w")
-
-        model_var = tk.StringVar(value=self._model_name.get())
-        model_opt = ctk.CTkOptionMenu(
-            body,
-            variable=model_var,
-            values=["qwen2.5:14b", "qwen2.5:7b", "qwen2.5:3b", "phi3:mini"],
-            fg_color=s.ACTION_BG,
-            button_color=s.ACTION_HOVER,
-            button_hover_color=s.SIDE_HOVER,
-            text_color=s.ACTION_TEXT,
-        )
-        model_opt.pack(fill="x", pady=(4, 10))
-
-        include_var = tk.BooleanVar(value=self._include_all_sheets.get())
-        ctk.CTkCheckBox(
-            body,
-            text="Indexar todas as abas por padrão",
-            variable=include_var,
-            fg_color=s.ACTION_BG,
-            border_color=s.ACTION_BORDER,
-            text_color=s.DARK_TEXT,
-            checkmark_color=s.ACTION_TEXT,
-        ).pack(anchor="w")
-
-        ctk.CTkLabel(body, text="Limite de linhas por aba", fg_color="transparent", text_color=s.DARK_TEXT).pack(
-            anchor="w", pady=(10, 0)
-        )
-        max_rows_var = tk.StringVar(value=str(self._max_rows_per_sheet.get()))
-        ctk.CTkEntry(
-            body,
-            textvariable=max_rows_var,
-            fg_color=s.INPUT_BG,
-            border_color=s.INPUT_BORDER,
-            text_color=s.DARK_TEXT,
-        ).pack(fill="x", pady=(4, 10))
-        ctk.CTkLabel(
-            body,
-            text="Use 0 para ilimitado. Para planilhas muito grandes, prefira 1000 a 5000.",
-            fg_color="transparent",
-            text_color=s.MUTED_TEXT,
-        ).pack(anchor="w", pady=(0, 10))
-
-        ctk.CTkLabel(
-            body,
-            text=f"Recomendado para seu hardware: {rec_model} ({rec_hint})",
-            fg_color="transparent",
-            text_color=s.MUTED_TEXT,
-            wraplength=490,
-            justify="left",
-        ).pack(anchor="w", pady=(0, 8))
-
-        # Integracoes / OAuth - LOGIN SOCIAL em destaque
-        ctk.CTkLabel(
-            body,
-            text="Login social",
-            fg_color="transparent",
-            text_color=s.DARK_TEXT,
-            font=ctk.CTkFont(family=s.FONT_FAMILY, size=s.SMALL_SIZE, weight="bold"),
-        ).pack(anchor="w", pady=(8, 2))
-        ctk.CTkLabel(
-            body,
-            text=(
-                "Clique para abrir a tela de login do Google ou Microsoft. "
-                "Depois de autorizar, Gmail, Agenda, Drive, Outlook e OneDrive funcionam no chat."
-            ),
-            fg_color="transparent",
-            text_color=s.MUTED_TEXT,
-            wraplength=490,
-            justify="left",
-        ).pack(anchor="w", pady=(0, 10))
-
-        google_status_var = tk.StringVar(value=provider_status("google"))
-        microsoft_status_var = tk.StringVar(value=provider_status("microsoft"))
-
-        _btn_style = dict(
-            fg_color=s.ACTION_BG,
-            text_color=s.ACTION_TEXT,
-            border_width=1,
-            border_color=s.ACTION_BORDER,
-            hover_color=s.ACTION_HOVER,
-        )
-        _btn_large = dict(**_btn_style, width=180, height=36)
-
-        def refresh_oauth_status():
-            google_status_var.set(provider_status("google"))
-            microsoft_status_var.set(provider_status("microsoft"))
-
-        def connect_oauth(provider: str):
-            label = "Google" if provider == "google" else "Microsoft"
-            cid = get_default_client_id(provider)
-
-            if not cid:
-                self.status_var.set(
-                    f"Credenciais de {label} nao configuradas. "
-                    "O desenvolvedor deve preencher em oauth_defaults.py"
-                )
-                return
-
-            self.status_var.set(f"Abrindo tela de login do {label}...")
-
-            def worker():
-                msg = connect_provider(provider, cid)
-
-                def finish():
-                    refresh_oauth_status()
-                    self.status_var.set(msg)
-
-                self.root.after(0, finish)
-
-            threading.Thread(target=worker, daemon=True).start()
-
-        def disconnect_oauth(provider: str):
-            msg = disconnect_provider(provider)
-            refresh_oauth_status()
-            self.status_var.set(msg)
-
-        # Botões de login em destaque
-        oauth_btns = ctk.CTkFrame(body, fg_color="transparent")
-        oauth_btns.pack(fill="x", pady=(0, 8))
-        ctk.CTkButton(
-            oauth_btns,
-            text="Entrar com Google",
-            command=lambda: connect_oauth("google"),
-            **_btn_large,
-        ).pack(side="left", padx=(0, 8))
-        ctk.CTkButton(
-            oauth_btns,
-            text="Entrar com Microsoft",
-            command=lambda: connect_oauth("microsoft"),
-            **_btn_large,
-        ).pack(side="left")
-
-        g_row = ctk.CTkFrame(body, fg_color="transparent")
-        g_row.pack(fill="x", pady=(2, 0))
-        ctk.CTkLabel(g_row, textvariable=google_status_var, fg_color="transparent", text_color=s.MUTED_TEXT).pack(
-            side="left"
-        )
-        ctk.CTkButton(g_row, text="Desconectar", command=lambda: disconnect_oauth("google"), width=90, height=24, **_btn_style).pack(
-            side="left", padx=(8, 0)
-        )
-        m_row = ctk.CTkFrame(body, fg_color="transparent")
-        m_row.pack(fill="x", pady=(2, 8))
-        ctk.CTkLabel(m_row, textvariable=microsoft_status_var, fg_color="transparent", text_color=s.MUTED_TEXT).pack(
-            side="left"
-        )
-        ctk.CTkButton(m_row, text="Desconectar", command=lambda: disconnect_oauth("microsoft"), width=90, height=24, **_btn_style).pack(
-            side="left", padx=(8, 0)
-        )
-
-        footer = ctk.CTkFrame(body, fg_color="transparent")
-        footer.pack(fill="x", pady=(8, 0))
-
-        def apply_recommended():
-            model_var.set(rec_model)
-
-        def save_and_close():
-            self._model_name.set(model_var.get().strip() or DEFAULT_MODEL)
-            self._include_all_sheets.set(bool(include_var.get()))
-            try:
-                raw_value = int(max_rows_var.get().strip())
-                self._max_rows_per_sheet.set(0 if raw_value <= 0 else min(raw_value, 200000))
-            except Exception:
-                self._max_rows_per_sheet.set(0)
-            self._save_current_settings({})
-            self.status_var.set("Configurações salvas.")
-            win.destroy()
-
-        ctk.CTkButton(footer, text="Aplicar recomendado", command=apply_recommended, **_btn_style).pack(side="left")
-        ctk.CTkButton(footer, text="Salvar", command=save_and_close, **_btn_style).pack(side="right")
+        self._settings.open_settings()
 
     def _on_help(self):
         win = ctk.CTkToplevel(self.root)

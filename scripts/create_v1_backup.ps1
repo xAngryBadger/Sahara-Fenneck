@@ -1,5 +1,5 @@
 param(
-    [string]$Root = "e:\Sahara Fenneck"
+    [string]$Root = ($PSScriptRoot | Split-Path)
 )
 
 $ErrorActionPreference = "Stop"

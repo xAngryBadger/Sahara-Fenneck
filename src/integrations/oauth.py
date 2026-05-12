@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 OAuth guiado (PKCE + loopback local) para Google e Microsoft.
 """
@@ -7,6 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import os
 import secrets
 import subprocess
@@ -20,6 +20,8 @@ from typing import Any
 
 from .oauth_defaults import get_default_client_id
 from .token_store import clear_provider_token, get_provider_token, set_provider_token
+
+log = logging.getLogger(__name__)
 
 PROVIDERS: dict[str, dict[str, Any]] = {
     "google": {
@@ -71,7 +73,10 @@ def _http_form_post(url: str, data: dict[str, str]) -> tuple[int, dict[str, Any]
         try:
             details = getattr(e, "read")().decode("utf-8", errors="replace")
         except Exception:
+            log.exception("Falha ao ler detalhes do erro HTTP")
             details = str(e)
+        code = int(getattr(e, "code", 500))
+        return code, {}, details
         code = int(getattr(e, "code", 500))
         return code, {}, details
 
@@ -101,29 +106,29 @@ def _open_auth_url(url: str) -> tuple[bool, str]:
         except Exception as e:
             last_err = str(e)
 
-        # 3) PowerShell Start-Process (força abertura)
-        try:
-            subprocess.Popen(
-                ["powershell", "-NoProfile", "-NonInteractive", "-Command", f"Start-Process '{url}'"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-            )
-            return True, ""
-        except Exception as e:
-            last_err = str(e)
+    # 3) PowerShell Start-Process (URL passed as argument, not interpolated)
+    try:
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Start-Process", url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+        return True, ""
+    except Exception as e:
+        last_err = str(e)
 
-        # 4) cmd /c start (fallback)
-        try:
-            subprocess.Popen(
-                ["cmd", "/c", "start", "", url],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-            )
-            return True, ""
-        except Exception as e:
-            last_err = str(e)
+    # 4) cmd /c start (fallback)
+    try:
+        subprocess.Popen(
+            ["cmd", "/c", "start", "", url],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
+        )
+        return True, ""
+    except Exception as e:
+        last_err = str(e)
 
     return False, last_err
 

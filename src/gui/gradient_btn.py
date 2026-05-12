@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 """
 Botao com estilo gradiente 3D transparente (claro no topo, sombra suave embaixo).
 Simulado com faixas CTkFrame para compatibilidade com CustomTkinter.
 """
 import customtkinter as ctk
+
 from . import styles as s
 
 

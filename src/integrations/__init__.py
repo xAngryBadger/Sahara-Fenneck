@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Integracoes externas da v2."""
 
 from .oauth import connect_provider, disconnect_provider, get_access_token, provider_status

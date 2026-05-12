@@ -1,16 +1,17 @@
-# -*- coding: utf-8 -*-
 """
 Cliente Ollama para chamadas ao LLM local.
 """
 from __future__ import annotations
 
 import json as _json
+import logging
 import os
 import shutil
 import subprocess
 import time
 import urllib.request
-from typing import Optional
+
+log = logging.getLogger(__name__)
 
 DEFAULT_MODEL = "qwen2.5:7b"
 OLLAMA_BASE = "http://localhost:11434"
@@ -20,12 +21,13 @@ def _check_ollama() -> bool:
     try:
         req = urllib.request.Request(f"{OLLAMA_BASE}/api/tags", method="GET")
         with urllib.request.urlopen(req, timeout=2) as r:
-            return r.status == 200
+            return bool(r.status == 200)
     except Exception:
+        log.warning("Falha ao verificar disponibilidade do Ollama")
         return False
 
 
-def _find_ollama_exe() -> Optional[str]:
+def _find_ollama_exe() -> str | None:
     cmd = shutil.which("ollama")
     if cmd:
         return cmd
@@ -48,6 +50,7 @@ def _start_ollama_if_possible(timeout_sec: int = 20) -> bool:
     try:
         subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
+        log.warning("Falha ao iniciar processo do Ollama")
         return False
 
     deadline = time.time() + timeout_sec
@@ -66,6 +69,7 @@ def _list_local_models() -> list[str]:
             data = _json.loads(r.read().decode())
         return [m["name"] for m in data.get("models", [])]
     except Exception:
+        log.warning("Falha ao listar modelos locais do Ollama")
         return []
 
 
@@ -74,14 +78,11 @@ def _resolve_model(requested: str) -> str:
     available = _list_local_models()
     if not available:
         return requested
-    # exact match
     if requested in available:
         return requested
-    # prefix match (e.g. "qwen2.5:7b" vs "qwen2.5:7b-instruct-q4_0")
     for m in available:
         if m.startswith(requested.split(":")[0]):
             return m
-    # last resort: first installed model
     return available[0]
 
 
@@ -96,20 +97,21 @@ def _pull_model_if_missing(model: str) -> bool:
         pull = subprocess.run([exe, "pull", model], timeout=3600)
         return pull.returncode == 0
     except Exception:
+        log.warning("Falha ao baixar modelo '%s' no Ollama", model)
         return False
 
 
 class OllamaClient:
     """Chama o modelo via API HTTP do Ollama."""
 
-    def __init__(self, model: Optional[str] = None, base_url: str = OLLAMA_BASE):
+    def __init__(self, model: str | None = None, base_url: str = OLLAMA_BASE):
         self.model = _resolve_model(model or DEFAULT_MODEL)
         self.base_url = base_url.rstrip("/")
 
     def is_available(self) -> bool:
         return _check_ollama() or _start_ollama_if_possible()
 
-    def generate(self, prompt: str, system: Optional[str] = None, max_tokens: int = 2048) -> str:
+    def generate(self, prompt: str, system: str | None = None, max_tokens: int = 2048) -> str:
         """Envia prompt e retorna a resposta do modelo."""
         try:
             payload = {
@@ -135,6 +137,7 @@ class OllamaClient:
                 with urllib.request.urlopen(req, timeout=120) as r2:
                     out = _json.loads(r2.read().decode())
 
-            return out.get("response", "").strip()
+            return str(out.get("response", "")).strip()
         except Exception as e:
+            log.exception("Erro ao gerar resposta com Ollama")
             return f"[Erro Ollama: {e!s}]"

@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """
 Paleta Sahara Fennec v4 -- polida, gradiente macio, patinha.
 """

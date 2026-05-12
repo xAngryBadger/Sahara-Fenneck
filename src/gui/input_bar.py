@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 """
 Input arredondado macio + botao enviar circular com patinha.
 """
 import customtkinter as ctk
+
 from . import styles as s
 
 PLACEHOLDER = "Digite sua solicitacao (ex: Otimize com funil de vendas, filtros e graficos...)"

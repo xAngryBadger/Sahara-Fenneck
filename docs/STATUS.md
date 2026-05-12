@@ -1,4 +1,4 @@
-﻿# Status do projeto – Sahara Fennec
+# Status do projeto – Sahara Fennec
 
 ## Estado atual
 

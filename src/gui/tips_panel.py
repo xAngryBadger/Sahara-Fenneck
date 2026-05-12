@@ -1,9 +1,9 @@
-# -*- coding: utf-8 -*-
 """
 Painel de dicas (tips) -- sempre visivel, abaixo dos botoes de acao.
 Label + grade de botoes em 2 colunas para nao estourar a largura.
 """
 import customtkinter as ctk
+
 from . import styles as s
 
 DEFAULT_TIPS = [
