@@ -83,12 +83,16 @@ class ChatController:
                 def on_cp(label: str):
                     self._root.after(0, lambda: self._status_var.set(f"Checkpoint salvo: {label}"))
 
+                def on_prog(status: str):
+                    self._root.after(0, lambda s=status: self._status_var.set(s))
+
                 kwargs = dict(
                     text=text,
                     workspace=ws,
                     client=client,
                     on_message=on_msg,
                     on_checkpoint=on_cp,
+                    on_progress=on_prog,
                 )
                 if on_confirm_change:
                     kwargs["on_confirm_change"] = on_confirm_change

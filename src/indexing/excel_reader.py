@@ -490,6 +490,95 @@ def _build_categorical_values(ws: Workspace, max_unique: int = 15) -> list[str]:
     return lines
 
 
+def _col_letter(idx: int) -> str:
+    result = ""
+    idx += 1
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        result = chr(65 + rem) + result
+    return result
+
+
+def _build_a1_map(ws: Workspace) -> str:
+    if not ws.columns:
+        return ""
+    parts = []
+    for i, col in enumerate(ws.columns[:26]):
+        parts.append(f"{_col_letter(i)}={col}")
+    text = ", ".join(parts)
+    if len(ws.columns) > 26:
+        text += "..."
+    return f"Referência A1: {text}"
+
+
+def _detect_header_offset(ws: Workspace | pd.DataFrame) -> int:
+    if isinstance(ws, pd.DataFrame):
+        df = ws
+    else:
+        df = ws.df
+    if df is None or df.empty or len(df) < 2:
+        return 0
+    best_score = -1
+    best_offset = 0
+    limit = min(5, len(df))
+    for offset in range(1, limit + 1):
+        row = df.iloc[offset - 1]
+        total = 0
+        good = 0
+        for val in row:
+            total += 1
+            if isinstance(val, str) and val.strip() and len(val.strip()) < 50:
+                good += 1
+            elif pd.notna(val) and not isinstance(val, (int, float)):
+                good += 1
+        if total == 0:
+            continue
+        score = good / total
+        if score > best_score:
+            best_score = score
+            best_offset = offset
+    if best_score < 0.5:
+        return 0
+    return best_offset
+
+
+def apply_header_offset(ws: Workspace, offset: int) -> Workspace:
+    if ws.df is None or ws.df.empty or offset <= 0:
+        return ws
+    new_df = ws.df.copy()
+    header_row = new_df.iloc[offset - 1]
+    new_cols = []
+    for val in header_row:
+        label = str(val).strip() if pd.notna(val) and str(val).strip() != "nan" else None
+        new_cols.append(label)
+    for i, c in enumerate(new_cols):
+        if not c:
+            new_cols[i] = f"Col{i + 1}"
+    seen: dict[str, int] = {}
+    final_cols: list[str] = []
+    for c in new_cols:
+        seen[c] = seen.get(c, 0) + 1
+        if seen[c] > 1:
+            final_cols.append(f"{c}_{seen[c]}")
+        else:
+            final_cols.append(c)
+    new_df = new_df.iloc[offset:].reset_index(drop=True)
+    new_df.columns = final_cols
+    return Workspace(
+        path=ws.path,
+        workbook_name=ws.workbook_name,
+        sheet_name=ws.sheet_name,
+        columns=final_cols,
+        row_count=max(0, ws.row_count - offset),
+        indexed_rows=len(new_df),
+        truncated=ws.truncated,
+        df=new_df,
+        excel_live=ws.excel_live,
+        excel_book_name=ws.excel_book_name,
+        error=ws.error,
+    )
+
+
 def get_workspace_summary(ws: Workspace, max_context_chars: int = 6000) -> str:
     """Contexto rico da workspace para o LLM — dtypes, stats, amostra head+tail, valores categóricos.
 
@@ -514,6 +603,15 @@ def get_workspace_summary(ws: Workspace, max_context_chars: int = 6000) -> str:
     if len(ws.columns) > 20:
         col_display += "..."
     lines.append(f"Colunas ({len(ws.columns)}): {col_display}")
+
+    a1_map = _build_a1_map(ws)
+    if a1_map:
+        lines.append(a1_map)
+
+    if ws.df is not None and not ws.df.empty:
+        hint_offset = _detect_header_offset(ws)
+        if hint_offset > 0:
+            lines.append(f"⚠ O cabeçalho parece estar na linha {hint_offset + 1}. Considere usar adjust_header para corrigir.")
 
     if ws.df is not None and not ws.df.empty:
 

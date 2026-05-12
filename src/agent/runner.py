@@ -15,6 +15,7 @@ from ..checkpoints.manager import CheckpointManager
 from ..errcodes import ErrCode, err_str
 from ..indexing.excel_reader import (
     Workspace,
+    apply_header_offset,
     get_workbook_overview,
     get_workspace_summary,
     hydrate_workspace_full,
@@ -344,6 +345,7 @@ def run_agent(
     on_message: Callable[[str], None] | None = None,
     on_checkpoint: Callable[[str], None] | None = None,
     on_confirm_change: Callable[[str], bool] | None = None,
+    on_progress: Callable[[str], None] | None = None,
     max_steps: int = 5,
 ) -> str:
     """
@@ -441,6 +443,8 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
 
     for step in range(max_steps):
         last_step = step
+        if on_progress:
+            on_progress(f"Pensando... etapa {step + 1}/{max_steps}")
         t_llm = time.monotonic()
         response = client.generate("\n\n".join(messages), system=SYSTEM)
         t_llm_elapsed = time.monotonic() - t_llm
@@ -472,6 +476,8 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
                     break
 
             save_checkpoint_now = not checkpoint_saved_for_order
+            if on_progress:
+                on_progress("Aplicando alterações na planilha...")
             t_tool = time.monotonic()
             result = structured_actions_tool(
                 workspace,
@@ -485,6 +491,32 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
                 checkpoint_saved_for_order = True
 
             if result.success:
+                if result.message == "__REQUEST_MORE_ROWS__":
+                    if on_progress:
+                        on_progress("Carregando mais dados...")
+                    refreshed = hydrate_workspace_full(workspace)
+                    if refreshed is not workspace and not refreshed.error:
+                        workspace.df = refreshed.df
+                        workspace.row_count = refreshed.row_count
+                        workspace.indexed_rows = refreshed.indexed_rows
+                        workspace.truncated = refreshed.truncated
+                    data_summary = get_workspace_summary(workspace)
+                    messages.append(response)
+                    messages.append(f"Mais dados carregados. Dados atuais:\n{data_summary}\nResponda novamente com base nos dados completos.")
+                    continue
+
+                if result.message.startswith("__ADJUST_HEADER__"):
+                    try:
+                        offset = int(result.message.split("__ADJUST_HEADER__")[1])
+                    except (ValueError, IndexError):
+                        offset = 0
+                    if offset > 0:
+                        workspace = apply_header_offset(workspace, offset)
+                    data_summary = get_workspace_summary(workspace)
+                    messages.append(response)
+                    messages.append(f"Cabeçalho ajustado para linha {offset + 1}. Novos dados:\n{data_summary}\nResponda novamente com os cabeçalhos corrigidos.")
+                    continue
+
                 clean_text = _strip_tool_payload_from_response(response, actions_payload, "ACTIONS")
                 final_answer = (clean_text + "\n\n" + result.message).strip()
                 if on_message:

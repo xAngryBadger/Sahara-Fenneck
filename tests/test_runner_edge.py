@@ -355,3 +355,62 @@ class TestListSheetNamesNoPath:
     def test_no_path_returns_empty(self):
         ws = Workspace(path="", workbook_name="", sheet_name="", columns=[], row_count=0, indexed_rows=0)
         assert _list_sheet_names(ws) == []
+
+
+class TestRequestMoreRows:
+    def test_request_more_rows_reprompts(self, tmp_path):
+        import json
+        xlsx = tmp_path / "more_rows.xlsx"
+        pd.DataFrame({"A": range(100)}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="more_rows.xlsx", sheet_name="Sheet",
+            columns=["A"], row_count=100, indexed_rows=50, truncated=True,
+            df=pd.DataFrame({"A": range(50)}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        actions = [{"action": "request_more_rows"}]
+        call_count = 0
+
+        def mock_generate(prompt, system=None, max_tokens=2048):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return f"[ACTIONS]\n{json.dumps({'actions': actions})}\n[/ACTIONS]"
+            return "Dados carregados com sucesso."
+
+        client = MagicMock()
+        client.is_available.return_value = True
+        client.generate = mock_generate
+        msgs = []
+        result = run_agent("altera para carregar mais linhas", ws, client=client, on_message=lambda t: msgs.append(t), max_steps=3)
+        assert call_count == 2
+        assert "sucesso" in result.lower() or "dados" in result.lower()
+
+
+class TestAdjustHeader:
+    def test_adjust_header_reprompts(self, tmp_path):
+        import json
+        xlsx = tmp_path / "header.xlsx"
+        df = pd.DataFrame({"0": ["Nome", "Alice", "Bob"], "1": ["Idade", 25, 30]})
+        df.to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="header.xlsx", sheet_name="Sheet",
+            columns=["0", "1"], row_count=3, indexed_rows=3, df=df,
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        actions = [{"action": "adjust_header"}]
+        call_count = 0
+
+        def mock_generate(prompt, system=None, max_tokens=2048):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return f"[ACTIONS]\n{json.dumps({'actions': actions})}\n[/ACTIONS]"
+            return "Cabeçalho ajustado."
+
+        client = MagicMock()
+        client.is_available.return_value = True
+        client.generate = mock_generate
+        msgs = []
+        result = run_agent("altera o cabeçalho", ws, client=client, on_message=lambda t: msgs.append(t), max_steps=3)
+        assert call_count == 2

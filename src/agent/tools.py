@@ -374,6 +374,16 @@ def _apply_actions_to_df(df, actions: list[dict]):
             except Exception as e:
                 return None, f"Ação #{idx} change_dtype: erro ao converter coluna '{col}' para {dtype}: {e!s}"
 
+        elif kind == "adjust_header":
+            from ..indexing.excel_reader import _detect_header_offset
+            offset = _detect_header_offset(out)
+            if offset <= 0:
+                return None, f"Ação #{idx} adjust_header: não foi possível detectar um cabeçalho alternativo."
+            return out, f"__ADJUST_HEADER__{offset}"
+
+        elif kind == "request_more_rows":
+            return out, "__REQUEST_MORE_ROWS__"
+
         else:
             return None, f"Ação #{idx} desconhecida: {kind}"
 
@@ -486,6 +496,8 @@ def structured_actions_tool(
     if df_actions:
         new_df, err = _apply_actions_to_df(df, df_actions)
         if err:
+            if err.startswith("__REQUEST_MORE_ROWS__") or err.startswith("__ADJUST_HEADER__"):
+                return ToolResult.ok(err)
             return ToolResult.err(err, code=_classify_err(err))
     else:
         new_df = df.copy() if df is not None else pd.DataFrame(columns=workspace.columns or [])

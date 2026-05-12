@@ -216,6 +216,9 @@ Qualquer outro texto é enviado como pergunta ao agente Fennec.""")
         self._messages.clear()
         print(f"{_DIM}Processando...{_RESET}", end="", flush=True)
 
+        def _on_progress(status: str):
+            print(f"\r{_DIM}{status}{_RESET}", end="", flush=True)
+
         result = run_agent(
             query=query,
             workspace=self.workspace,
@@ -223,6 +226,7 @@ Qualquer outro texto é enviado como pergunta ao agente Fennec.""")
             on_message=self._on_message,
             on_checkpoint=self._on_checkpoint,
             on_confirm_change=self._on_confirm_change,
+            on_progress=_on_progress,
         )
 
         print(f"\r{' ' * 20}\r", end="")

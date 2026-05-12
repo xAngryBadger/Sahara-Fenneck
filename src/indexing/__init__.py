@@ -2,6 +2,7 @@
 from .excel_reader import (
     DEFAULT_MAX_ROWS,
     Workspace,
+    apply_header_offset,
     get_workspace_summary,
     hydrate_workspace_full,
     index_file_multi,
@@ -21,4 +22,5 @@ __all__ = [
     "index_file_multi",
     "get_workspace_summary",
     "hydrate_workspace_full",
+    "apply_header_offset",
 ]

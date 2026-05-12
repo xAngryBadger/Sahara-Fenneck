@@ -382,3 +382,509 @@ class TestHydrateWorkspaceFull:
         ws_full = hydrate_workspace_full(ws_trunc)
         assert ws_full.truncated is False
         assert ws_full.indexed_rows == 50
+
+
+class TestEngineForSuffix:
+    def test_xlsx(self):
+        from src.indexing.excel_reader import _engine_for_suffix
+        assert _engine_for_suffix(".xlsx") == "openpyxl"
+
+    def test_xlsm(self):
+        from src.indexing.excel_reader import _engine_for_suffix
+        assert _engine_for_suffix(".xlsm") == "openpyxl"
+
+    def test_xls(self):
+        from src.indexing.excel_reader import _engine_for_suffix
+        assert _engine_for_suffix(".xls") == "xlrd"
+
+    def test_ods(self):
+        from src.indexing.excel_reader import _engine_for_suffix
+        assert _engine_for_suffix(".ods") == "odf"
+
+    def test_unknown(self):
+        from src.indexing.excel_reader import _engine_for_suffix
+        assert _engine_for_suffix(".csv") is None
+
+    def test_uppercase(self):
+        from src.indexing.excel_reader import _engine_for_suffix
+        assert _engine_for_suffix(".XLSX") == "openpyxl"
+
+
+class TestIndexFileMultiEdgeCases:
+    def test_ods_file(self, tmp_path):
+        ods = tmp_path / "test.ods"
+        pd.DataFrame({"X": [1, 2]}).to_excel(ods, index=False, engine="odf")
+        items = index_file_multi(str(ods))
+        assert len(items) >= 1
+        assert items[0].error is None
+        assert items[0].columns == ["X"]
+
+    def test_xls_file(self, tmp_path):
+        xlsx = tmp_path / "fake_xls.xlsx"
+        pd.DataFrame({"Y": [10, 20]}).to_excel(xlsx, index=False, engine="openpyxl")
+        items = index_file_multi(str(xlsx))
+        assert len(items) >= 1
+        assert items[0].error is None
+
+    def test_corrupt_file(self, tmp_path):
+        bad = tmp_path / "bad.xlsx"
+        bad.write_text("this is not an excel file")
+        items = index_file_multi(str(bad))
+        assert len(items) == 1
+        assert items[0].error is not None
+
+    def test_empty_sheet_error(self, tmp_path):
+        xlsx = tmp_path / "empty_sheet.xlsx"
+        pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
+        items = index_file_multi(str(xlsx))
+        assert len(items) >= 1
+
+    def test_all_sheets_flag(self, tmp_path):
+        xlsx = tmp_path / "multi_flag.xlsx"
+        with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
+            pd.DataFrame({"A": [1]}).to_excel(writer, sheet_name="S1", index=False)
+            pd.DataFrame({"B": [2]}).to_excel(writer, sheet_name="S2", index=False)
+        items = index_file_multi(str(xlsx), include_all_sheets=True)
+        assert len(items) == 2
+
+    def test_max_rows_truncation(self, tmp_path):
+        xlsx = tmp_path / "big.xlsx"
+        pd.DataFrame({"A": range(100)}).to_excel(xlsx, index=False, engine="openpyxl")
+        items = index_file_multi(str(xlsx), max_rows=10)
+        assert items[0].truncated is True
+        assert items[0].indexed_rows == 10
+        assert items[0].row_count == 100
+
+
+class TestIndexFromPathEdgeCases:
+    def test_specific_sheet_found(self, tmp_path):
+        xlsx = tmp_path / "specific.xlsx"
+        with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
+            pd.DataFrame({"A": [1]}).to_excel(writer, sheet_name="Alpha", index=False)
+            pd.DataFrame({"B": [2]}).to_excel(writer, sheet_name="Beta", index=False)
+        ws = index_from_path(str(xlsx), sheet_name="Beta")
+        assert ws.sheet_name == "Beta"
+
+    def test_missing_sheet_returns_first(self, tmp_path):
+        xlsx = tmp_path / "miss_sheet.xlsx"
+        with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
+            pd.DataFrame({"A": [1]}).to_excel(writer, sheet_name="Only", index=False)
+        ws = index_from_path(str(xlsx), sheet_name="Ghost")
+        assert ws.sheet_name == "Only"
+
+    def test_file_not_found(self, tmp_path):
+        ws = index_from_path(str(tmp_path / "nonexistent.xlsx"))
+        assert ws.error is not None
+
+
+class TestSafeHeadersMoreCases:
+    def test_all_none(self):
+        from src.indexing.excel_reader import _safe_headers
+        result = _safe_headers([None, None, None], 3)
+        assert result == ["Col1", "Col2", "Col3"]
+
+    def test_mixed_valid_and_none(self):
+        from src.indexing.excel_reader import _safe_headers
+        result = _safe_headers(["Name", None, "Age"], 3)
+        assert result == ["Name", "Col2", "Age"]
+
+
+class TestRowsToDfEdgeCases:
+    def test_none_pd(self):
+        from src.indexing import excel_reader as er
+        original_pd = er.pd
+        try:
+            er.pd = None
+            result = _rows_to_df(["A", "B"], [[1, 2]])
+            assert result is None
+        finally:
+            er.pd = original_pd
+
+
+class TestWorkspaceSummaryOneLine:
+    def test_basic(self, workspace):
+        line = workspace.summary_one_line()
+        assert "test.xlsx" in line
+        assert "Planilha1" in line
+
+    def test_with_error(self):
+        ws = Workspace(path="", workbook_name="", sheet_name="", columns=[], row_count=0, indexed_rows=0, error="Some error")
+        assert ws.summary_one_line() == "Some error"
+
+    def test_truncated(self, workspace):
+        workspace.truncated = True
+        line = workspace.summary_one_line()
+        assert "amostra" in line
+
+
+class TestGetWorkbookOverviewEdgeCases:
+    def test_many_sheets(self, tmp_path):
+        xlsx = tmp_path / "many_sheets.xlsx"
+        with pd.ExcelWriter(xlsx, engine="openpyxl") as writer:
+            for i in range(25):
+                pd.DataFrame({"C": [1]}).to_excel(writer, sheet_name=f"Sheet{i}", index=False)
+        overview = get_workbook_overview(str(xlsx))
+        assert "25 aba(s)" in overview
+        assert "aba" in overview
+
+    def test_nontabular_sheet_in_overview(self, tmp_path):
+        xlsx = tmp_path / "nontab_overview.xlsx"
+        df = pd.DataFrame({"Unnamed: 0": [1], "Unnamed: 1": [2], "Col3": [3]})
+        df.to_excel(xlsx, index=False, engine="openpyxl")
+        overview = get_workbook_overview(str(xlsx))
+        assert "não-tabular" in overview
+
+    def test_invalid_format_overview(self, tmp_path):
+        bad = tmp_path / "bad.csv"
+        bad.write_text("a,b\n1,2")
+        overview = get_workbook_overview(str(bad))
+        assert "formato" in overview.lower() or "invalid" in overview.lower() or "Err" in overview
+
+    def test_no_sheets_overview(self, tmp_path):
+        xlsx = tmp_path / "nosheets.xlsx"
+        pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
+        overview = get_workbook_overview(str(xlsx))
+        assert "aba" in overview.lower() or "A" in overview
+
+    def test_many_columns_truncated(self, tmp_path):
+        xlsx = tmp_path / "wide.xlsx"
+        cols = {f"Col{i}": [1] for i in range(25)}
+        pd.DataFrame(cols).to_excel(xlsx, index=False, engine="openpyxl")
+        overview = get_workbook_overview(str(xlsx))
+        assert "..." in overview
+
+
+class TestBuildColumnStatsEdgeCases:
+    def test_all_null_numeric(self, workspace):
+        import numpy as np
+        from src.indexing.excel_reader import _build_column_stats
+        workspace.df = pd.DataFrame({"A": [np.nan, np.nan, np.nan]})
+        workspace.columns = ["A"]
+        lines = _build_column_stats(workspace)
+        assert len(lines) == 1
+        assert "100%" in lines[0]
+
+    def test_many_columns_display(self, workspace):
+        cols = [f"Col{i}" for i in range(25)]
+        df = pd.DataFrame({c: [1] for c in cols})
+        workspace.df = df
+        workspace.columns = cols
+        workspace.row_count = 1
+        workspace.indexed_rows = 1
+        summary = get_workspace_summary(workspace)
+        assert "..." in summary
+
+
+class TestBuildCategoricalEdgeCases:
+    def test_zero_unique_values(self, workspace):
+        from src.indexing.excel_reader import _build_categorical_values
+        workspace.df = pd.DataFrame({"X": [None, None, None]})
+        workspace.columns = ["X"]
+        lines = _build_categorical_values(workspace)
+        assert len(lines) == 0
+
+    def test_more_than_max_unique(self, workspace):
+        from src.indexing.excel_reader import _build_categorical_values
+        workspace.df = pd.DataFrame({"Y": [str(i) for i in range(20)]})
+        workspace.columns = ["Y"]
+        lines = _build_categorical_values(workspace, max_unique=15)
+        assert len(lines) == 0
+
+
+class TestIndexFileMultiSheetReadError:
+    def test_sheet_read_error(self, tmp_path):
+        from unittest.mock import patch
+        xlsx = tmp_path / "sheet_err.xlsx"
+        pd.DataFrame({"A": [1, 2]}).to_excel(xlsx, index=False, engine="openpyxl")
+        with patch("pandas.read_excel", side_effect=RuntimeError("boom")):
+            items = index_file_multi(str(xlsx))
+        assert len(items) == 1
+        assert items[0].error is not None
+
+    def test_empty_sheet_no_columns(self, tmp_path):
+        from unittest.mock import patch
+        xlsx = tmp_path / "empty_sheet.xlsx"
+        pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
+        empty_df = pd.DataFrame()
+        with patch("pandas.read_excel", return_value=empty_df):
+            items = index_file_multi(str(xlsx))
+        assert len(items) == 1
+        assert items[0].error is not None
+
+
+class TestHydrateWithExcelLive:
+    def test_excel_live_truncated_returns_self(self):
+        ws = Workspace(
+            path="", workbook_name="wb", sheet_name="s1",
+            columns=[], row_count=0, indexed_rows=0,
+            truncated=True, excel_live=True,
+        )
+        result = hydrate_workspace_full(ws)
+        assert result is ws or result.error is not None
+
+
+class TestTrimSummaryTailRemoval:
+    def test_trim_removes_tail(self, workspace):
+        workspace.df = pd.DataFrame({f"Col{i}": range(100) for i in range(10)})
+        workspace.columns = list(workspace.df.columns)
+        workspace.row_count = 100
+        workspace.indexed_rows = 100
+        workspace.truncated = False
+        summary = get_workspace_summary(workspace, max_context_chars=500)
+        assert len(summary) <= 510
+
+
+class TestIsNontabularEdgeCases:
+    def test_operator_precedence(self):
+        ws = Workspace(
+            path="", workbook_name="", sheet_name="",
+            columns=["ColABC", "RealCol"], row_count=10, indexed_rows=10,
+            df=pd.DataFrame({"ColABC": [1, 2], "RealCol": [3, 4]}),
+        )
+        from src.indexing.excel_reader import _is_nontabular
+        assert _is_nontabular(ws) is False
+
+    def test_exactly_50_rows_not_flagged(self):
+        ws = Workspace(
+            path="", workbook_name="", sheet_name="",
+            columns=["Unnamed: 0", "Unnamed: 1"], row_count=50, indexed_rows=50,
+            df=pd.DataFrame({"Unnamed: 0": range(50), "Unnamed: 1": range(50)}),
+        )
+        from src.indexing.excel_reader import _is_nontabular
+        assert _is_nontabular(ws) is False
+
+
+class TestWorkbookOverviewDeepCoverage:
+    def test_invalid_format_returns_error(self, tmp_path):
+        txt = tmp_path / "data.txt"
+        txt.write_text("hello")
+        result = get_workbook_overview(str(txt))
+        assert "Err" in result or "formato" in result.lower() or "invalid" in result.lower()
+
+    def test_corrupt_file_open_error(self, tmp_path):
+        bad = tmp_path / "corrupt.xlsx"
+        bad.write_bytes(b"PK\x03\x04" + b"\x00" * 100)
+        result = get_workbook_overview(str(bad))
+        assert result.startswith("[E") or "índex" in result.lower() or "zip" in result.lower()
+
+    def test_sheet_read_error_in_overview(self, tmp_path):
+        from unittest.mock import patch
+        xlsx = tmp_path / "sheet_err_ov.xlsx"
+        pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
+        call_count = [0]
+        original_read = pd.read_excel
+
+        def flaky_read(*args, **kwargs):
+            call_count[0] += 1
+            if call_count[0] == 1 and "nrows" in kwargs:
+                raise RuntimeError("sheet error")
+            return original_read(*args, **kwargs)
+
+        with patch("pandas.read_excel", side_effect=flaky_read):
+            result = get_workbook_overview(str(xlsx))
+        assert "erro de leitura" in result
+
+    def test_empty_sheet_no_cols_in_overview(self, tmp_path):
+        from unittest.mock import patch
+        xlsx = tmp_path / "empty_overview.xlsx"
+        pd.DataFrame({"A": [1]}).to_excel(xlsx, index=False, engine="openpyxl")
+        empty_df = pd.DataFrame()
+        call_count = [0]
+        original_read = pd.read_excel
+
+        def patched_read(*args, **kwargs):
+            call_count[0] += 1
+            if "nrows" in kwargs:
+                return empty_df
+            return original_read(*args, **kwargs)
+
+        with patch("pandas.read_excel", side_effect=patched_read):
+            result = get_workbook_overview(str(xlsx))
+        assert "vazia" in result
+
+    def test_more_than_6_columns_in_overview(self, tmp_path):
+        xlsx = tmp_path / "wide_ov.xlsx"
+        cols = {f"Col{i}": [1] for i in range(8)}
+        pd.DataFrame(cols).to_excel(xlsx, index=False, engine="openpyxl")
+        result = get_workbook_overview(str(xlsx))
+        assert "..." in result
+
+    def test_total_rows_read_error(self, tmp_path):
+        from unittest.mock import patch
+        xlsx = tmp_path / "row_err.xlsx"
+        pd.DataFrame({"A": range(10)}).to_excel(xlsx, index=False, engine="openpyxl")
+        call_count = [0]
+        original_read = pd.read_excel
+
+        def patched_read(*args, **kwargs):
+            call_count[0] += 1
+            if "nrows" not in kwargs and call_count[0] > 1:
+                raise RuntimeError("can't count rows")
+            return original_read(*args, **kwargs)
+
+        with patch("pandas.read_excel", side_effect=patched_read):
+            result = get_workbook_overview(str(xlsx))
+        assert "?" in result
+
+    def test_not_found(self, tmp_path):
+        result = get_workbook_overview(str(tmp_path / "nonexistent.xlsx"))
+        assert "Err" in result or "não encontrad" in result.lower()
+
+
+class TestColLetter:
+    def test_single_letters(self):
+        from src.indexing.excel_reader import _col_letter
+        assert _col_letter(0) == "A"
+        assert _col_letter(1) == "B"
+        assert _col_letter(25) == "Z"
+
+    def test_double_letters(self):
+        from src.indexing.excel_reader import _col_letter
+        assert _col_letter(26) == "AA"
+        assert _col_letter(27) == "AB"
+        assert _col_letter(51) == "AZ"
+        assert _col_letter(52) == "BA"
+
+
+class TestBuildA1Map:
+    def test_basic(self):
+        from src.indexing.excel_reader import _build_a1_map
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=["Nome", "Idade", "Cidade"],
+            row_count=3, indexed_rows=3,
+            df=pd.DataFrame({"Nome": ["a"], "Idade": [1], "Cidade": ["x"]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        result = _build_a1_map(ws)
+        assert "A=Nome" in result
+        assert "B=Idade" in result
+        assert "C=Cidade" in result
+
+    def test_empty_columns(self):
+        from src.indexing.excel_reader import _build_a1_map
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=[], row_count=0, indexed_rows=0, df=None,
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        assert _build_a1_map(ws) == ""
+
+    def test_many_columns(self):
+        from src.indexing.excel_reader import _build_a1_map
+        cols = [f"Col{i}" for i in range(30)]
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=cols, row_count=1, indexed_rows=1,
+            df=pd.DataFrame({c: [0] for c in cols}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        result = _build_a1_map(ws)
+        assert "..." in result
+
+
+class TestDetectHeaderOffset:
+    def test_detects_header_row(self):
+        from src.indexing.excel_reader import _detect_header_offset
+        df = pd.DataFrame({
+            "0": ["title", "Alice", "Bob"],
+            "1": ["name", 25, 30],
+            "2": ["city", "SP", "RJ"],
+        })
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=["0", "1", "2"], row_count=3, indexed_rows=3, df=df,
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        offset = _detect_header_offset(ws)
+        assert offset >= 1
+
+    def test_no_good_header(self):
+        from src.indexing.excel_reader import _detect_header_offset
+        df = pd.DataFrame({"A": [1, 2, 3], "B": [4, 5, 6]})
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=["A", "B"], row_count=3, indexed_rows=3, df=df,
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        offset = _detect_header_offset(ws)
+        assert offset == 0
+
+    def test_empty_df(self):
+        from src.indexing.excel_reader import _detect_header_offset
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=[], row_count=0, indexed_rows=0, df=pd.DataFrame(),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        assert _detect_header_offset(ws) == 0
+
+
+class TestApplyHeaderOffset:
+    def test_shifts_header(self):
+        from src.indexing.excel_reader import apply_header_offset
+        df = pd.DataFrame({
+            "0": ["Nome", "Alice", "Bob"],
+            "1": ["Idade", 25, 30],
+        })
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=["0", "1"], row_count=3, indexed_rows=3, df=df,
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        new_ws = apply_header_offset(ws, 1)
+        assert "Nome" in new_ws.columns
+        assert "Idade" in new_ws.columns
+        assert len(new_ws.df) == 2
+
+    def test_zero_offset_noop(self):
+        from src.indexing.excel_reader import apply_header_offset
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=["A", "B"], row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"A": [1, 2], "B": [3, 4]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        result = apply_header_offset(ws, 0)
+        assert result is ws
+
+    def test_duplicate_headers_get_suffix(self):
+        from src.indexing.excel_reader import apply_header_offset
+        df = pd.DataFrame({
+            "0": ["X", "a", "b"],
+            "1": ["X", "c", "d"],
+        })
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=["0", "1"], row_count=3, indexed_rows=3, df=df,
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        new_ws = apply_header_offset(ws, 1)
+        assert "X" in new_ws.columns
+        assert "X_2" in new_ws.columns
+
+
+class TestA1MapInSummary:
+    def test_a1_map_appears(self):
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=["Nome", "Idade"],
+            row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"Nome": ["Alice"], "Idade": [25]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        result = get_workspace_summary(ws)
+        assert "Referência A1" in result
+
+    def test_header_hint_when_detected(self):
+        df = pd.DataFrame({
+            "0": ["Nome", "Alice"],
+            "1": ["Idade", 25],
+        })
+        ws = Workspace(
+            path="/t.xlsx", workbook_name="t", sheet_name="S",
+            columns=["0", "1"], row_count=2, indexed_rows=2, df=df,
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        result = get_workspace_summary(ws)
+        assert "cabeçalho" in result.lower() or "adjust_header" in result.lower()

@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import secrets
+import shutil
 import subprocess
 import threading
 import time
@@ -106,7 +107,7 @@ def _open_auth_url(url: str) -> tuple[bool, str]:
         except Exception as e:
             last_err = str(e)
 
-    # 3) PowerShell Start-Process (URL passed as argument, not interpolated)
+    # 3) PowerShell Start-Process (URL passed as separate argument — not interpolated)
     try:
         subprocess.Popen(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", "Start-Process", url],
@@ -118,17 +119,19 @@ def _open_auth_url(url: str) -> tuple[bool, str]:
     except Exception as e:
         last_err = str(e)
 
-    # 4) cmd /c start (fallback)
-    try:
-        subprocess.Popen(
-            ["cmd", "/c", "start", "", url],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0,
-        )
-        return True, ""
-    except Exception as e:
-        last_err = str(e)
+    # 4) xdg-open / open (Linux/macOS fallback)
+    if os.name != "nt":
+        try:
+            opener = shutil.which("xdg-open") or shutil.which("open")
+            if opener:
+                subprocess.Popen(
+                    [opener, url],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True, ""
+        except Exception as e:
+            last_err = str(e)
 
     return False, last_err
 
