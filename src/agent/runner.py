@@ -32,12 +32,13 @@ log = logging.getLogger(__name__)
 # Intent classifier — keyword check to reduce spurious [ACTIONS] on read-only queries.
 # ---------------------------------------------------------------------------
 _MODIFY_SIGNALS = re.compile(
-    r"\b(ordena|sort|filtra|filter|preenche|preencha|renomeia|renomeie|"
+    r"\b(ordena|ordene|sort|filtra|filtre|filter|preenche|preencha|renomeia|renomeie|"
     r"remove|remova|apaga|apague|deleta|delete|cria|crie|adiciona|adicione|"
     r"insere|insira|substitui|substitua|troca|troque|muda|mude|altera|altere|"
-    r"duplica|duplicate|limpa|limpe|formata|formate|coloca|coloque|"
+    r"duplica|duplique|duplicate|limpa|limpe|formata|formate|coloca|coloque|"
     r"nova aba|nova coluna|nova planilha|nova linha|aplica|aplique|"
-    r"faz isso|execute|executa)\b",
+    r"faz isso|execute|executa|calcule|calcula|agrupa|agrupe|"
+    r"pivot|resuma|resumir|converta|converte)\b",
     re.IGNORECASE,
 )
 
@@ -372,9 +373,21 @@ def run_agent(
             data_summary = get_workspace_summary(workspace)
             context_parts.append(f"Dados da aba ativa:\n{data_summary}")
             context_text = "\n\n".join(context_parts)
-            ro_prompt = f"{context_text}\n\nPergunta: {query}"
+            ro_prompt = f"{context_text}\n\nPergunta do usuário: {query}\n\nResponda e, se for aplicar alterações na planilha, prefira [ACTIONS]...[/ACTIONS].\nUse [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estruturadas."
             response = client.generate(ro_prompt, system=SYSTEM)
             log.info("[perf] read-only path: %.2fs", time.monotonic() - t0)
+            actions_payload = _extract_actions(response) or _extract_loose_actions(response)
+            if actions_payload:
+                cp = CheckpointManager(workspace.path, interaction_label="Otimização")
+                result = structured_actions_tool(
+                    workspace, actions_payload, cp, save_checkpoint=False,
+                )
+                if result.success:
+                    clean_text = _strip_tool_payload_from_response(response, actions_payload, "ACTIONS")
+                    final_answer = (clean_text + "\n\n" + result.message).strip()
+                    if on_message:
+                        on_message(final_answer)
+                    return final_answer
             clean = re.sub(r"\[/?(?:ACTIONS|OPTIMIZE)\]", "", response).strip()
             if clean:
                 if on_message:

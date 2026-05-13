@@ -146,7 +146,7 @@ class TestChangeDtype:
     def test_to_str(self, df):
         result, err = _apply_actions_to_df(df, [{"action": "change_dtype", "column": "CEP", "dtype": "str"}])
         assert err == ""
-        assert result["CEP"].dtype == object
+        assert pd.api.types.is_string_dtype(result["CEP"])
         assert result.iloc[0]["CEP"] == "12345678"
 
     def test_to_float(self, df):

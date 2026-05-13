@@ -412,5 +412,5 @@ class TestAdjustHeader:
         client.is_available.return_value = True
         client.generate = mock_generate
         msgs = []
-        result = run_agent("altera o cabeçalho", ws, client=client, on_message=lambda t: msgs.append(t), max_steps=3)
+        run_agent("altera o cabeçalho", ws, client=client, on_message=lambda t: msgs.append(t), max_steps=3)
         assert call_count == 2

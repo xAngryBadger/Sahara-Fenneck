@@ -77,14 +77,18 @@ class ChatController:
 
                 client = create_client(settings)
 
+                def _safe_after(fn):
+                    if self._root.winfo_exists():
+                        self._root.after(0, fn)
+
                 def on_msg(msg: str):
-                    self._root.after(0, lambda m=msg: self.add_fennec_bubble(m))
+                    _safe_after(lambda m=msg: self.add_fennec_bubble(m))
 
                 def on_cp(label: str):
-                    self._root.after(0, lambda: self._status_var.set(f"Checkpoint salvo: {label}"))
+                    _safe_after(lambda: self._status_var.set(f"Checkpoint salvo: {label}"))
 
                 def on_prog(status: str):
-                    self._root.after(0, lambda s=status: self._status_var.set(s))
+                    _safe_after(lambda s=status: self._status_var.set(s))
 
                 kwargs = dict(
                     text=text,
@@ -98,10 +102,13 @@ class ChatController:
                     kwargs["on_confirm_change"] = on_confirm_change
 
                 run_agent(**kwargs)
-                self._root.after(0, self._agent_done)
+                _safe_after(self._agent_done)
             except Exception as e:
                 log.exception("Erro durante execução do agente")
-                self._root.after(0, lambda exc=e: self._agent_done(error=f"Erro: {exc!s}"))
+                try:
+                    _safe_after(lambda exc=e: self._agent_done(error=f"Erro: {exc!s}"))
+                except Exception:
+                    pass
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -181,24 +188,28 @@ class ChatController:
             ctk.CTkButton(footer, text="Cancelar", width=110, command=reject, **btn_style).pack(side="right")
             ctk.CTkButton(footer, text="Confirmar", width=110, command=approve, **btn_style).pack(side="right", padx=(0, 8))
 
-            _win_ref[0].protocol("WM_DELETE_WINDOW", _reject_ref[0])
-            try:
-                _win_ref[0].grab_set()
-                _win_ref[0].focus()
-            except Exception:
-                log.exception("Falha ao capturar foco da janela de confirmação")
+        _win_ref[0].protocol("WM_DELETE_WINDOW", _reject_ref[0])
+        try:
+            _win_ref[0].after(50, _win_ref[0].grab_set)
+            _win_ref[0].focus()
+        except Exception:
+            log.exception("Falha ao capturar foco da janela de confirmação")
 
         self._root.after(0, show_dialog)
         timed_out = not decision.wait(timeout=300)
 
+        def _safe_after(fn):
+            if self._root.winfo_exists():
+                self._root.after(0, fn)
+
         if timed_out:
             result["approved"] = False
-            self._root.after(0, lambda: self._status_var.set("Confirmação expirada (5 min). Alteração cancelada."))
+            _safe_after(lambda: self._status_var.set("Confirmação expirada (5 min). Alteração cancelada."))
 
         if result["approved"]:
-            self._root.after(0, lambda: self._status_var.set("Confirmado. Aplicando alteracoes..."))
+            _safe_after(lambda: self._status_var.set("Confirmado. Aplicando alteracoes..."))
         else:
-            self._root.after(0, lambda: self._status_var.set("Alteracao cancelada pelo usuario."))
+            _safe_after(lambda: self._status_var.set("Alteracao cancelada pelo usuario."))
         return bool(result["approved"])
 
     def _scroll_bottom(self):

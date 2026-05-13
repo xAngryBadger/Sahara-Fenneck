@@ -336,7 +336,7 @@ def _apply_actions_to_df(df, actions: list[dict]):
         elif kind == "strip_whitespace":
             cols = a.get("columns")
             if cols is None:
-                str_cols = [c for c in out.columns if out[c].dtype == object]
+                str_cols = [c for c in out.columns if pd.api.types.is_string_dtype(out[c])]
             else:
                 if isinstance(cols, str):
                     cols = [cols]
@@ -348,7 +348,7 @@ def _apply_actions_to_df(df, actions: list[dict]):
                     if not ok:
                         return None, f"Ação #{idx} strip_whitespace: {err}"
             for c in str_cols:
-                if c in out.columns and out[c].dtype == object:
+                if c in out.columns and pd.api.types.is_string_dtype(out[c]):
                     out[c] = out[c].astype(str).str.strip()
 
         elif kind == "change_dtype":
@@ -454,6 +454,9 @@ def _classify_err(msg: str) -> ErrCode:
     if "desconhecida" in msg:
         return ErrCode.ACTION_UNKNOWN
     return ErrCode.ACTION_INVALID
+
+
+_QUERY_KINDS = {"groupby_agg", "pivot_table"}
 
 
 def structured_actions_tool(
@@ -624,11 +627,16 @@ def structured_actions_tool(
                 log.exception("Falha ao salvar arquivo via to_excel (structured_actions)")
                 return ToolResult.err(f"Erro ao salvar arquivo: {e!s}", code=ErrCode.EXCEL_SAVE_DF)
 
-        if df_actions and new_df is not None:
-            workspace.df = new_df
-            workspace.columns = list(new_df.columns)
-            workspace.row_count = int(len(new_df))
-            workspace.indexed_rows = int(len(new_df))
-            workspace.truncated = False
+    if df_actions and new_df is not None:
+        workspace.df = new_df
+        workspace.columns = list(new_df.columns)
+        workspace.row_count = int(len(new_df))
+        workspace.indexed_rows = int(len(new_df))
+        workspace.truncated = False
 
-        return ToolResult.ok(f"Otimização estruturada aplicada com sucesso.{checkpoint_suffix}")
+    has_query = any(str(a.get("action", "")).strip().lower() in _QUERY_KINDS for a in df_actions)
+    if has_query and new_df is not None:
+        preview = new_df.to_string(max_rows=50)
+        return ToolResult.ok(f"Resultado:\n{preview}{checkpoint_suffix}")
+
+    return ToolResult.ok(f"Otimização estruturada aplicada com sucesso.{checkpoint_suffix}")

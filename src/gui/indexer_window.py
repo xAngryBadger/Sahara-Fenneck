@@ -39,7 +39,7 @@ class IndexerWindow(ctk.CTkToplevel):
         self.title("Indexar Planilhas")
         self.geometry("620x520")
         self.transient(parent)
-        self.grab_set()
+        self.after(50, self.grab_set)
         self.configure(fg_color=s.BG_WARM)
 
         self._on_indexed = on_indexed
@@ -215,10 +215,18 @@ class IndexerWindow(ctk.CTkToplevel):
     def _pick_files(self):
         from tkinter import filedialog
 
+        try:
+            self.grab_release()
+        except Exception:
+            pass
         paths = filedialog.askopenfilenames(
             title="Selecionar planilhas",
             filetypes=[("Planilhas", "*.xlsx *.xlsm *.xls *.ods"), ("Todos", "*.*")],
         )
+        try:
+            self.after(50, self.grab_set)
+        except Exception:
+            pass
         self._append_files(list(paths))
 
     def _append_files(self, files: list[str]):

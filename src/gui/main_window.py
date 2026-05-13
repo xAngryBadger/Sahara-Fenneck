@@ -2,6 +2,7 @@
 Sahara Fennec - Janela principal (UI + backend integrado).
 """
 import logging
+import sys
 import tkinter as tk
 from pathlib import Path
 
@@ -106,7 +107,7 @@ class MainWindow:
 
     def _check_pending_models(self):
         import os
-        pending = Path(os.environ.get("APPDATA", "")) / "SaharaFennec" / "pending_models.txt"
+        pending = Path(os.environ.get("APPDATA") or str(Path.home() / ".sahara_fennec")) / "pending_models.txt"
         if pending.exists():
             try:
                 models = [m.strip() for m in pending.read_text(encoding="utf-8").splitlines() if m.strip()]
@@ -121,11 +122,21 @@ class MainWindow:
 
     def _set_icon(self):
         ico = _ASSETS / "fennec_head_icon.ico"
-        if ico.exists():
+        png = _ASSETS / "fennec_head_icon.png"
+        if png.exists():
+            try:
+                from PIL import Image, ImageTk
+                img = Image.open(png)
+                self._icon_photo = ImageTk.PhotoImage(img)
+                self.root.iconphoto(True, self._icon_photo)
+                return
+            except Exception:
+                log.exception("Falha ao definir ícone da janela via iconphoto")
+        if ico.exists() and sys.platform == "win32":
             try:
                 self.root.iconbitmap(str(ico))
             except Exception:
-                log.exception("Falha ao definir ícone da janela")
+                log.exception("Falha ao definir ícone da janela via iconbitmap")
 
     def _draw_bg(self, _ev=None):
         self._bg.delete("all")
@@ -238,16 +249,11 @@ class MainWindow:
         return b
 
     def _hide_scrollbar(self, scrollable: ctk.CTkScrollableFrame):
-        """Deixa scrollbar visualmente invisível (scroll por mouse/trackpad continua)."""
         try:
-            sb = scrollable._scrollbar  # acesso interno do CTkScrollableFrame
-            sb.configure(width=0, fg_color="transparent", button_color="transparent", button_hover_color="transparent")
-            try:
-                sb.grid_remove()
-            except Exception:
-                log.exception("Falha ao ocultar scrollbar")
+            sb = scrollable._scrollbar
+            sb.grid_remove()
         except Exception:
-            log.exception("Falha ao acessar scrollbar interno do CTkScrollableFrame")
+            pass
 
     def _reset_chat(self):
         for child in self._chat_scroll.winfo_children():

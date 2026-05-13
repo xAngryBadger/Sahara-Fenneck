@@ -164,7 +164,7 @@ class InstructPanel(ctk.CTkFrame):
         win.title("Instrução")
         win.geometry("380x140")
         win.transient(self.winfo_toplevel())
-        win.grab_set()
+        win.after(50, win.grab_set)
         win.configure(fg_color=s.BG_WARM)
 
         ctk.CTkLabel(

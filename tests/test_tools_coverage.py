@@ -223,7 +223,7 @@ class TestChangeDtypeAction:
         df = pd.DataFrame({"A": [1, 2]})
         result, err = _apply_actions_to_df(df, [{"action": "change_dtype", "column": "A", "dtype": "str"}])
         assert not err
-        assert result["A"].dtype == object
+        assert pd.api.types.is_string_dtype(result["A"])
 
     def test_to_datetime(self):
         df = pd.DataFrame({"A": ["2024-01-01", "2024-06-15"]})

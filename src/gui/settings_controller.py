@@ -70,6 +70,7 @@ class SettingsController:
                 ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
                 stderr=subprocess.DEVNULL,
                 text=True,
+                timeout=5,
             )
             vals = [float(x.strip()) / 1024.0 for x in out.splitlines() if x.strip()]
             if vals:
@@ -153,7 +154,7 @@ class SettingsController:
         nim_key_var = tk.StringVar(value=stored_key)
         ctk.CTkEntry(
             nim_frame,
-            variable=nim_key_var,
+            textvariable=nim_key_var,
             show="*",
             fg_color=s.INPUT_BG,
             border_color=s.INPUT_BORDER,
@@ -170,7 +171,7 @@ class SettingsController:
         nim_url_var = tk.StringVar(value=self._nim_base_url.get())
         ctk.CTkEntry(
             nim_frame,
-            variable=nim_url_var,
+            textvariable=nim_url_var,
             fg_color=s.INPUT_BG,
             border_color=s.INPUT_BORDER,
             text_color=s.DARK_TEXT,
