@@ -37,21 +37,15 @@ class TestNimClientAvailability:
 
     @patch("src.agent.nim_client.NimClient._get_client")
     def test_available_with_key_and_ping(self, mock_get):
-        fake_response = MagicMock()
-        fake_response.choices = [MagicMock()]
-        fake_response.choices[0].message.content = "ok"
         fake_client = MagicMock()
-        fake_client.chat.completions.create.return_value = fake_response
         mock_get.return_value = fake_client
         c = NimClient(api_key="nvapi-key")
         assert c.is_available() is True
-        fake_client.chat.completions.create.assert_called_once()
+        mock_get.assert_called()
 
     @patch("src.agent.nim_client.NimClient._get_client")
-    def test_unavailable_on_connection_error(self, mock_get):
-        fake_client = MagicMock()
-        fake_client.chat.completions.create.side_effect = Exception("connection error")
-        mock_get.return_value = fake_client
+    def test_unavailable_on_init_error(self, mock_get):
+        mock_get.side_effect = Exception("connection error")
         c = NimClient(api_key="nvapi-key")
         assert c.is_available() is False
 

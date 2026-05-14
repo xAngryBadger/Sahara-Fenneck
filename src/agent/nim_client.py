@@ -41,12 +41,7 @@ class NimClient:
         if not self.api_key:
             return False
         try:
-            client = self._get_client()
-            client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": "ping"}],
-                max_tokens=1,
-            )
+            self._get_client()
             return True
         except Exception as e:
             log.debug("NIM availability check failed: %s", e)

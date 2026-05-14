@@ -458,6 +458,8 @@ def _classify_err(msg: str) -> ErrCode:
 
 _QUERY_KINDS = {"groupby_agg", "pivot_table"}
 
+_WB_KINDS = {"duplicate_sheet", "create_sheet", "delete_sheet", "rename_sheet"}
+
 
 def structured_actions_tool(
     workspace: Workspace,
@@ -492,7 +494,6 @@ def structured_actions_tool(
         df = pd.DataFrame(columns=workspace.columns or [])
 
     # Separate workbook-level actions (sheet ops) from df-level actions
-    _WB_KINDS = {"duplicate_sheet", "create_sheet", "delete_sheet", "rename_sheet"}
     wb_actions = [a for a in actions if str(a.get("action", "")).strip().lower() in _WB_KINDS]
     df_actions = [a for a in actions if str(a.get("action", "")).strip().lower() not in _WB_KINDS]
 

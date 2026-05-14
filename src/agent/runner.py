@@ -22,7 +22,7 @@ from ..indexing.excel_reader import (
     index_from_path,
 )
 from ..integrations import handle_integration_query
-from .llm_client import LLMClient
+from .llm_client import LLMClient, create_client
 from .ollama_client import OllamaClient
 from .tools import structured_actions_tool
 
@@ -249,7 +249,7 @@ def _extract_loose_actions(code_text: str) -> str | None:
         try:
             raw = json.loads(candidate)
         except Exception:
-            log.exception("Falha ao analisar JSON de acoes soltas")
+            log.debug("Falha ao analisar JSON de acoes soltas")
             continue
 
         if isinstance(raw, dict) and isinstance(raw.get("actions"), list) and raw.get("actions"):
@@ -343,6 +343,7 @@ def run_agent(
     query: str,
     workspace: Workspace,
     client: LLMClient | None = None,
+    settings: dict | None = None,
     on_message: Callable[[str], None] | None = None,
     on_checkpoint: Callable[[str], None] | None = None,
     on_confirm_change: Callable[[str], bool] | None = None,
@@ -364,7 +365,7 @@ def run_agent(
         switched = _switch_workspace_to_sheet(query, workspace)
         if switched is not workspace:
             workspace = switched
-        client = client or OllamaClient()
+        client = client or (create_client(settings) if settings else OllamaClient())
         if client.is_available():
             context_parts: list[str] = []
             if _is_workbook_broad_query(query, workspace):
@@ -404,18 +405,8 @@ def run_agent(
 
     refreshed = hydrate_workspace_full(workspace)
     t_hydrate = time.monotonic() - t_start
-    if refreshed is not workspace:
-        workspace.path = refreshed.path
-        workspace.workbook_name = refreshed.workbook_name
-        workspace.sheet_name = refreshed.sheet_name
-        workspace.columns = refreshed.columns
-        workspace.row_count = refreshed.row_count
-        workspace.indexed_rows = refreshed.indexed_rows
-        workspace.truncated = refreshed.truncated
-        workspace.df = refreshed.df
-        workspace.excel_live = refreshed.excel_live
-        workspace.excel_book_name = refreshed.excel_book_name
-        workspace.error = refreshed.error
+    if refreshed is not workspace and not refreshed.error:
+        workspace = refreshed
 
     workspace = _switch_workspace_to_sheet(query, workspace)
 

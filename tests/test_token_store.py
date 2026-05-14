@@ -32,14 +32,28 @@ class TestFernetKey:
         assert len(raw) == 32
 
     @patch.dict(os.environ, {"USERNAME": "testuser", "COMPUTERNAME": "testhost"})
-    def test_uses_env_vars(self):
-        key = _fernet_key()
+    def test_falls_back_to_env_vars_when_key_file_unwritable(self, tmp_path):
+        from unittest.mock import patch
+        settings_path = tmp_path / "readonly" / "settings.json"
+        with patch("src.integrations.token_store.get_settings_path", return_value=settings_path), \
+             patch("pathlib.Path.write_bytes", side_effect=PermissionError("read-only")):
+            key = _fernet_key()
         import hashlib
-
         expected = base64.urlsafe_b64encode(
             hashlib.sha256(b"testuser@testhost").digest()
         )
         assert key == expected
+
+    def test_uses_key_file_when_present(self, tmp_path):
+        from unittest.mock import patch
+        import os as _os
+        stored = base64.urlsafe_b64encode(_os.urandom(32))
+        key_path = tmp_path / "sf" / ".enc_key"
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(stored)
+        with patch("src.integrations.token_store.get_settings_path", return_value=tmp_path / "sf" / "settings.json"):
+            key = _fernet_key()
+        assert key == stored
 
 
 class TestProtect:

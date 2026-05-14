@@ -223,6 +223,7 @@ Qualquer outro texto é enviado como pergunta ao agente Fennec.""")
             query=query,
             workspace=self.workspace,
             client=client,
+            settings=self.settings,
             on_message=self._on_message,
             on_checkpoint=self._on_checkpoint,
             on_confirm_change=self._on_confirm_change,

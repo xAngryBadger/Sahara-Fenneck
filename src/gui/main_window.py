@@ -139,6 +139,11 @@ class MainWindow:
                 log.exception("Falha ao definir ícone da janela via iconbitmap")
 
     def _draw_bg(self, _ev=None):
+        if hasattr(self, "_bg_draw_after_id"):
+            self.root.after_cancel(self._bg_draw_after_id)
+        self._bg_draw_after_id = self.root.after(80, self._do_draw_bg)
+
+    def _do_draw_bg(self):
         self._bg.delete("all")
         self._bg.update_idletasks()
         w = max(1, self._bg.winfo_width() or 500)

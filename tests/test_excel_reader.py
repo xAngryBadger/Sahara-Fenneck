@@ -715,6 +715,7 @@ class TestWorkbookOverviewDeepCoverage:
         pd.DataFrame({"A": range(10)}).to_excel(xlsx, index=False, engine="openpyxl")
         call_count = [0]
         original_read = pd.read_excel
+        original_load = __import__("openpyxl").load_workbook
 
         def patched_read(*args, **kwargs):
             call_count[0] += 1
@@ -722,7 +723,16 @@ class TestWorkbookOverviewDeepCoverage:
                 raise RuntimeError("can't count rows")
             return original_read(*args, **kwargs)
 
-        with patch("pandas.read_excel", side_effect=patched_read):
+        load_count = [0]
+
+        def patched_load(*args, **kwargs):
+            load_count[0] += 1
+            if load_count[0] > 1:
+                raise RuntimeError("can't count rows")
+            return original_load(*args, **kwargs)
+
+        with patch("pandas.read_excel", side_effect=patched_read), \
+             patch("openpyxl.load_workbook", side_effect=patched_load):
             result = get_workbook_overview(str(xlsx))
         assert "?" in result
 

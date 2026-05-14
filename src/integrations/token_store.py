@@ -24,7 +24,38 @@ def _tokens_path() -> Path:
 
 
 def _fernet_key() -> bytes:
-    """Derive a Fernet key from machine-specific data (hostname + username)."""
+    """Derive a Fernet key from a persistent random key file.
+
+    On first run, generates a cryptographically random key and stores it in
+    ``~/.sahara_fennec/.enc_key`` (or ``%APPDATA%/SaharaFennec/.enc_key`` on Windows).
+    The key file is protected by OS file permissions (0600 on POSIX).
+
+    Falls back to a machine-identity-derived key only when the key file is
+    inaccessible (e.g. read-only filesystem), which is still better than
+    plaintext but not as strong as a random key.
+    """
+    key_path = get_settings_path().parent / ".enc_key"
+
+    if key_path.exists():
+        try:
+            raw = base64.urlsafe_b64decode(key_path.read_bytes().strip())
+            if len(raw) == 32:
+                return base64.urlsafe_b64encode(raw)
+        except Exception:
+            log.debug("Failed to read existing encryption key file")
+
+    try:
+        raw_key = os.urandom(32)
+        b64 = base64.urlsafe_b64encode(raw_key)
+        key_path.parent.mkdir(parents=True, exist_ok=True)
+        key_path.write_bytes(b64)
+        try:
+            key_path.chmod(0o600)
+        except Exception:
+            pass
+        return b64
+    except Exception:
+        log.warning("Cannot write random key file, falling back to machine-identity key")
 
     identity = f"{os.getenv('USERNAME', 'user')}@{os.getenv('COMPUTERNAME', os.getenv('HOSTNAME', 'localhost'))}"
     raw = hashlib.sha256(identity.encode("utf-8")).digest()
@@ -93,8 +124,7 @@ def _migrate_if_plain(wrapper: dict) -> dict:
         if isinstance(parsed, dict) and parsed:
             _save_all(parsed)
             log.info("Migrated plaintext tokens to Fernet encryption")
-            with open(_tokens_path(), encoding="utf-8") as f:
-                return dict(json.loads(f.read()))
+            return dict(json.loads(_tokens_path().read_text(encoding="utf-8")))
     except Exception as e:
         log.error("Plaintext token migration failed: %s", e)
     return wrapper

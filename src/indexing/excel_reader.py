@@ -391,7 +391,7 @@ def _is_nontabular(ws: Workspace) -> bool:
     auto_names = 0
     for col in ws.columns:
         c = str(col)
-        if c.startswith("Unnamed") or c.startswith("Col") and c[3:].isdigit():
+        if c.startswith("Unnamed") or (c.startswith("Col") and c[3:].isdigit()):
             auto_names += 1
     if len(ws.columns) == 0:
         return False
@@ -518,7 +518,7 @@ def _detect_header_offset(ws: Workspace | pd.DataFrame) -> int:
         df = ws.df
     if df is None or df.empty or len(df) < 2:
         return 0
-    best_score = -1
+    best_score = -1.0
     best_offset = 0
     limit = min(5, len(df))
     for offset in range(1, limit + 1):
@@ -557,6 +557,7 @@ def apply_header_offset(ws: Workspace, offset: int) -> Workspace:
     seen: dict[str, int] = {}
     final_cols: list[str] = []
     for c in new_cols:
+        assert c is not None
         seen[c] = seen.get(c, 0) + 1
         if seen[c] > 1:
             final_cols.append(f"{c}_{seen[c]}")
@@ -704,48 +705,6 @@ def _trim_summary(text: str, ws: Workspace, max_chars: int) -> str:
 
     return text
 
-    tail_marker = "Últimas"
-    tail_idx = None
-    for i, line in enumerate(lines):
-        if line.startswith(tail_marker):
-            tail_idx = i
-            break
-    if tail_idx is not None:
-        end = tail_idx + 1
-        for i in range(end, len(lines)):
-            if lines[i] and not lines[i].startswith(" "):
-                end = i
-                break
-        else:
-            end = len(lines)
-        lines = lines[:tail_idx] + lines[end:]
-        text = "\n".join(lines)
-        if len(text) <= max_chars:
-            return text
-
-    stats_start = None
-    for i, line in enumerate(lines):
-        if "Estatísticas por coluna:" in line:
-            stats_start = i
-            break
-    if stats_start is not None:
-        next_section = None
-        for i in range(stats_start + 1, len(lines)):
-            if lines[i] and not lines[i].startswith("  "):
-                next_section = i
-                break
-        if next_section is None:
-            next_section = len(lines)
-        lines = lines[:stats_start] + lines[next_section:]
-        text = "\n".join(lines)
-        if len(text) <= max_chars:
-            return text
-
-    if len(text) > max_chars:
-        text = text[:max_chars - 3] + "..."
-
-    return text
-
 
 def get_workbook_overview(file_path: str, max_rows_per_sheet: int = 3) -> str:
     """Visão compacta de todas as abas do workbook para o LLM.
@@ -796,8 +755,19 @@ def get_workbook_overview(file_path: str, max_rows_per_sheet: int = 3) -> str:
 
         total_rows: int | str = "?"
         try:
-            full_df = pd.read_excel(xl, sheet_name=name)
-            total_rows = len(full_df)
+            if engine == "openpyxl":
+                import openpyxl as _oxl
+
+                _wb = _oxl.load_workbook(str(p), read_only=True, data_only=True)
+                _ws = _wb[name]
+                total_rows = _ws.max_row - 1 if _ws.max_row else 0
+                _wb.close()
+            elif engine == "odf":
+                total_df = pd.read_excel(xl, sheet_name=name)
+                total_rows = len(total_df)
+            elif engine == "xlrd":
+                total_df = pd.read_excel(xl, sheet_name=name)
+                total_rows = len(total_df)
         except Exception:
             pass
 

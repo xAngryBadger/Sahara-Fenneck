@@ -121,15 +121,15 @@ class CheckpointManager:
         workspace_entries = [e for e in data if self._normalized_workspace_key(e.get("workspace_path", "")) == key]
         other_entries = [e for e in data if self._normalized_workspace_key(e.get("workspace_path", "")) != key]
         if len(workspace_entries) > _MAX_INDEX_ENTRIES_PER_WORKSPACE:
-            workspace_entries = workspace_entries[-_MAX_INDEX_ENTRIES_PER_WORKSPACE:]
-            stale_paths = {
-                e["path"] for e in workspace_entries[: len(workspace_entries) - _MAX_INDEX_ENTRIES_PER_WORKSPACE]
-            }
+            keep = workspace_entries[-_MAX_INDEX_ENTRIES_PER_WORKSPACE:]
+            stale_entries = workspace_entries[: len(workspace_entries) - _MAX_INDEX_ENTRIES_PER_WORKSPACE]
+            stale_paths = {e.get("path", "") for e in stale_entries}
             for sp in stale_paths:
                 try:
                     Path(sp).unlink(missing_ok=True)
                 except Exception:
                     pass
+            workspace_entries = keep
         data = other_entries + workspace_entries
 
         self.index_file.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")

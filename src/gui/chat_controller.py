@@ -42,8 +42,6 @@ class ChatController:
         clean = (text or "").strip()
         if not clean:
             return
-        if clean == self._last_fennec_message:
-            return
         self._last_fennec_message = clean
         FennecBubble(self._chat_scroll, clean, avatar_image=self._imgs.get("head_avatar")).pack(
             anchor="w", fill="x", pady=(0, 6), padx=(0, 10)
@@ -94,6 +92,7 @@ class ChatController:
                     text=text,
                     workspace=ws,
                     client=client,
+                    settings=settings,
                     on_message=on_msg,
                     on_checkpoint=on_cp,
                     on_progress=on_prog,
@@ -121,7 +120,7 @@ class ChatController:
     def confirm_change_blocking(self, preview_text: str) -> bool:
         decision = threading.Event()
         result = {"approved": False}
-        _win_ref = [None]
+        _win_ref: list[object] = [None]
         _reject_ref = [lambda: None]
 
         def show_dialog():
@@ -188,10 +187,10 @@ class ChatController:
             ctk.CTkButton(footer, text="Cancelar", width=110, command=reject, **btn_style).pack(side="right")
             ctk.CTkButton(footer, text="Confirmar", width=110, command=approve, **btn_style).pack(side="right", padx=(0, 8))
 
-        _win_ref[0].protocol("WM_DELETE_WINDOW", _reject_ref[0])
+        win.protocol("WM_DELETE_WINDOW", _reject_ref[0])  # noqa: F821
         try:
-            _win_ref[0].after(50, _win_ref[0].grab_set)
-            _win_ref[0].focus()
+            win.after(50, win.grab_set)  # noqa: F821
+            win.focus()  # noqa: F821
         except Exception:
             log.exception("Falha ao capturar foco da janela de confirmação")
 
