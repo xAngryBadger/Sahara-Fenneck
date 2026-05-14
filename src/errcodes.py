@@ -7,6 +7,7 @@ class ErrCode(StrEnum):
     CHECKPOINT_SAVE = "E001"
     CHECKPOINT_RESTORE = "E002"
     PARSE_ACTIONS = "E003"
+    SANDBOX_VIOLATION = "E004"
     OPTIMIZE_DEPRECATED = "E005"
     EXCEL_NOT_FOUND = "E006"
     EXCEL_WRITE_COM = "E007"
@@ -15,6 +16,7 @@ class ErrCode(StrEnum):
     COLUMN_MISSING = "E010"
     ACTION_INVALID = "E011"
     ACTION_UNKNOWN = "E012"
+    OAUTH_STATE_MISMATCH = "E013"
     FILE_NOT_FOUND = "E014"
     FILE_INVALID_FORMAT = "E015"
     SHEET_EMPTY = "E016"
@@ -32,6 +34,7 @@ ERR_MESSAGES: dict[ErrCode, str] = {
     ErrCode.CHECKPOINT_SAVE: "Erro ao salvar checkpoint",
     ErrCode.CHECKPOINT_RESTORE: "Erro ao restaurar checkpoint",
     ErrCode.PARSE_ACTIONS: "Erro ao interpretar ações JSON",
+    ErrCode.SANDBOX_VIOLATION: "Código rejeitado pelo sandbox de segurança",
     ErrCode.OPTIMIZE_DEPRECATED: "optimize_tool removido — use structured_actions_tool",
     ErrCode.EXCEL_NOT_FOUND: "Excel aberto não encontrado",
     ErrCode.EXCEL_WRITE_COM: "Erro ao escrever no Excel via COM",
@@ -40,6 +43,7 @@ ERR_MESSAGES: dict[ErrCode, str] = {
     ErrCode.COLUMN_MISSING: "Coluna não encontrada",
     ErrCode.ACTION_INVALID: "Ação inválida",
     ErrCode.ACTION_UNKNOWN: "Tipo de ação desconhecido",
+    ErrCode.OAUTH_STATE_MISMATCH: "State OAuth inválido — possível ataque",
     ErrCode.FILE_NOT_FOUND: "Arquivo não encontrado",
     ErrCode.FILE_INVALID_FORMAT: "Formato inválido — selecione apenas planilhas",
     ErrCode.SHEET_EMPTY: "Aba vazia",

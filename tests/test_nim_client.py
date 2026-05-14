@@ -86,8 +86,8 @@ class TestNimClientGenerate:
 
     def test_generation_without_api_key(self):
         c = NimClient(api_key="")
-        result = c.generate("test")
-        assert "[E023]" in result
+        with pytest.raises(RuntimeError, match=r"\[E023\]"):
+            c.generate("test")
 
     @patch("src.agent.nim_client.NimClient._get_client")
     def test_auth_error(self, mock_get):
@@ -96,8 +96,8 @@ class TestNimClientGenerate:
         mock_get.return_value = fake_client
 
         c = NimClient(api_key="bad-key")
-        result = c.generate("test")
-        assert "[E023]" in result
+        with pytest.raises(RuntimeError, match=r"\[E023\]"):
+            c.generate("test")
 
     @patch("src.agent.nim_client.NimClient._get_client")
     def test_generic_request_error(self, mock_get):
@@ -106,14 +106,14 @@ class TestNimClientGenerate:
         mock_get.return_value = fake_client
 
         c = NimClient(api_key="nvapi-key")
-        result = c.generate("test")
-        assert "[E024]" in result
+        with pytest.raises(RuntimeError, match=r"\[E024\]"):
+            c.generate("test")
 
     def test_missing_openai_package(self):
         c = NimClient(api_key="nvapi-key")
         with patch.dict("sys.modules", {"openai": None}):
-            result = c.generate("test")
-            assert "[E022]" in result or "openai" in result.lower()
+            with pytest.raises(RuntimeError, match=r"\[E022\]"):
+                c.generate("test")
 
     @patch("src.agent.nim_client.NimClient._get_client")
     def test_empty_response_content(self, mock_get):

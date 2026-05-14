@@ -26,6 +26,7 @@ def send_teams_summary(workspace: Workspace) -> str:
         webhook,
         {"Content-Type": "application/json"},
         json.dumps({"text": text}).encode("utf-8"),
+        redact_url=True,
     )
     if 200 <= status < 300:
         return "Resumo enviado para o Microsoft Teams com sucesso."

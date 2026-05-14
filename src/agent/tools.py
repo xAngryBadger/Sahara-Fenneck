@@ -20,6 +20,9 @@ log = logging.getLogger(__name__)
 ALLOWED_MODULES = {"pandas", "openpyxl", "odf", "xlrd", "math", "datetime"}
 FORBIDDEN_NAMES = {
     "__import__",
+    "__build_class__",
+    "__builtins__",
+    "builtins",
     "eval",
     "exec",
     "open",
@@ -27,6 +30,7 @@ FORBIDDEN_NAMES = {
     "globals",
     "locals",
     "input",
+    "object",
     "os",
     "sys",
     "subprocess",
@@ -85,7 +89,7 @@ def _normalize_actions(actions_payload: str) -> tuple[list[dict], str]:
     Retorna (actions, erro)."""
     try:
         raw = json.loads(actions_payload)
-    except Exception as e:
+    except (ValueError, json.JSONDecodeError) as e:
         log.warning("JSON inválido em [ACTIONS]: %s", e)
         return [], f"JSON inválido em [ACTIONS]: {e!s}"
 
@@ -313,7 +317,7 @@ def _apply_actions_to_df(df, actions: list[dict]):
                 pv_kwargs["columns"] = columns_col
             try:
                 pv = out.pivot_table(**pv_kwargs).reset_index()
-            except Exception as e:
+            except (ValueError, TypeError, KeyError) as e:
                 return None, f"Ação #{idx} pivot_table: erro ao gerar pivot: {e!s}"
             out = pv
 
@@ -371,7 +375,7 @@ def _apply_actions_to_df(df, actions: list[dict]):
                     out[col] = out[col].astype(bool)
                 elif dtype == "datetime":
                     out[col] = pd.to_datetime(out[col], errors="coerce")
-            except Exception as e:
+            except (ValueError, TypeError) as e:
                 return None, f"Ação #{idx} change_dtype: erro ao converter coluna '{col}' para {dtype}: {e!s}"
 
         elif kind == "adjust_header":
@@ -428,15 +432,15 @@ def _excel_scalar(value):
         import pandas as pd  # type: ignore
         if pd.isna(value):
             return None
-    except Exception:
-        log.exception("Falha ao verificar valor NA com pandas")
+    except (ValueError, TypeError):
+        pass
 
     try:
         import numpy as np  # type: ignore
         if isinstance(value, np.generic):
             return value.item()
-    except Exception:
-        log.exception("Falha ao converter valor escalar numpy")
+    except (ValueError, TypeError):
+        pass
 
     return value
 
@@ -482,7 +486,7 @@ def structured_actions_tool(
             if on_checkpoint_saved:
                 on_checkpoint_saved(info.label)
             checkpoint_suffix = " Checkpoint salvo antes da ordem."
-        except Exception as cp_err:
+        except (OSError, PermissionError, RuntimeError) as cp_err:
             log.exception("Falha ao salvar checkpoint (structured_actions)")
             return ToolResult.err(f"Erro ao salvar checkpoint: {cp_err!s}", code=ErrCode.CHECKPOINT_SAVE)
 
@@ -516,7 +520,7 @@ def structured_actions_tool(
             log.info("Conversão de formato: %s → %s", original_suffix, ".xlsx")
         try:
             wb_openpyxl = openpyxl.load_workbook(save_path)
-        except Exception:
+        except (OSError, ValueError, KeyError):
             log.exception("Falha ao carregar workbook com openpyxl (structured_actions)")
             wb_openpyxl = None
 
@@ -524,64 +528,63 @@ def structured_actions_tool(
     if workspace.excel_live:
         try:
             from ..com_utils import COMContext
+        except ImportError:
+            COMContext = None # type: ignore[assignment,unused-ignore]
 
-            ctx = COMContext()
-            ctx.__enter__()
-        except Exception:
-            ctx = None
+        if COMContext is None:
+            return ToolResult.err("Excel aberto não encontrado para atualização em tempo real.", code=ErrCode.EXCEL_NOT_FOUND)
+
         try:
-            if ctx is None or not ctx.has_workbooks:
-                return ToolResult.err("Excel aberto não encontrado para atualização em tempo real.", code=ErrCode.EXCEL_NOT_FOUND)
-            wb = ctx.resolve_workbook(path=workspace.path, name=workspace.excel_book_name)
-            if wb is None:
-                return ToolResult.err("Excel aberto não encontrado para atualização em tempo real.", code=ErrCode.EXCEL_NOT_FOUND)
-            ws = wb.Worksheets(workspace.sheet_name) if workspace.sheet_name else wb.ActiveSheet
+            with COMContext() as ctx:
+                if ctx is None or not ctx.has_workbooks:
+                    return ToolResult.err("Excel aberto não encontrado para atualização em tempo real.", code=ErrCode.EXCEL_NOT_FOUND)
+                wb = ctx.resolve_workbook(path=workspace.path, name=workspace.excel_book_name)
+                if wb is None:
+                    return ToolResult.err("Excel aberto não encontrado para atualização em tempo real.", code=ErrCode.EXCEL_NOT_FOUND)
+                ws = wb.Worksheets(workspace.sheet_name) if workspace.sheet_name else wb.ActiveSheet
 
-            # Apply workbook-level actions (COM)
-            for a in wb_actions:
-                kind = str(a.get("action", "")).strip().lower()
-                base = workspace.sheet_name or "Aba"
-                new_name = str(a.get("name", f"{base} Cópia")).strip() or f"{base} Cópia"
-                if kind == "duplicate_sheet":
-                    src = wb.Worksheets(workspace.sheet_name) if workspace.sheet_name else wb.ActiveSheet
-                    src.Copy(After=wb.Worksheets(wb.Worksheets.Count))
-                    wb.Worksheets(wb.Worksheets.Count).Name = new_name
-                elif kind == "create_sheet":
-                    wb.Worksheets.Add(After=wb.Worksheets(wb.Worksheets.Count)).Name = new_name
-                elif kind == "delete_sheet":
-                    target_name = str(a.get("name", "")).strip()
-                    if target_name and wb.Worksheets.Count > 1:
-                        excel_app = wb.Application
-                        old_alerts = excel_app.DisplayAlerts
-                        excel_app.DisplayAlerts = False
-                        try:
-                            wb.Worksheets(target_name).Delete()
-                        finally:
-                            excel_app.DisplayAlerts = old_alerts
-                elif kind == "rename_sheet":
-                    old_name = str(a.get("from", "")).strip()
-                    new_n = str(a.get("to", "")).strip()
-                    if old_name and new_n:
-                        wb.Worksheets(old_name).Name = new_n
+                # Apply workbook-level actions (COM)
+                for a in wb_actions:
+                    kind = str(a.get("action", "")).strip().lower()
+                    base = workspace.sheet_name or "Aba"
+                    new_name = str(a.get("name", f"{base} Cópia")).strip() or f"{base} Cópia"
+                    if kind == "duplicate_sheet":
+                        src = wb.Worksheets(workspace.sheet_name) if workspace.sheet_name else wb.ActiveSheet
+                        src.Copy(After=wb.Worksheets(wb.Worksheets.Count))
+                        wb.Worksheets(wb.Worksheets.Count).Name = new_name
+                    elif kind == "create_sheet":
+                        wb.Worksheets.Add(After=wb.Worksheets(wb.Worksheets.Count)).Name = new_name
+                    elif kind == "delete_sheet":
+                        target_name = str(a.get("name", "")).strip()
+                        if target_name and wb.Worksheets.Count > 1:
+                            excel_app = wb.Application
+                            old_alerts = excel_app.DisplayAlerts
+                            excel_app.DisplayAlerts = False
+                            try:
+                                wb.Worksheets(target_name).Delete()
+                            finally:
+                                excel_app.DisplayAlerts = old_alerts
+                    elif kind == "rename_sheet":
+                        old_name = str(a.get("from", "")).strip()
+                        new_n = str(a.get("to", "")).strip()
+                        if old_name and new_n:
+                            wb.Worksheets(old_name).Name = new_n
 
-            if df_actions and new_df is not None:
-                ws.UsedRange.ClearContents()
-                if not new_df.empty:
-                    nrows, ncols = new_df.shape[0] + 1, new_df.shape[1]
-                    rows = _df_to_excel_matrix(new_df)
-                    ws.Range(ws.Cells(1, 1), ws.Cells(nrows, ncols)).Value = rows
-                elif len(new_df.columns) > 0:
-                    header = tuple(str(c) for c in new_df.columns)
-                    ws.Range(ws.Cells(1, 1), ws.Cells(1, len(header))).Value = (header,)
+                if df_actions and new_df is not None:
+                    ws.UsedRange.ClearContents()
+                    if not new_df.empty:
+                        nrows, ncols = new_df.shape[0] + 1, new_df.shape[1]
+                        rows = _df_to_excel_matrix(new_df)
+                        ws.Range(ws.Cells(1, 1), ws.Cells(nrows, ncols)).Value = rows
+                    elif len(new_df.columns) > 0:
+                        header = tuple(str(c) for c in new_df.columns)
+                        ws.Range(ws.Cells(1, 1), ws.Cells(1, len(header))).Value = (header,)
 
-            wb.Save()
-            return ToolResult.ok(f"Otimização estruturada aplicada com sucesso (COM).{checkpoint_suffix}")
+                wb.Save()
+                return ToolResult.ok(f"Otimização estruturada aplicada com sucesso (COM).{checkpoint_suffix}")
         except Exception as e:
             log.exception("Falha ao escrever no Excel via COM (structured_actions)")
             return ToolResult.err(f"Erro ao escrever no Excel: {e!s}", code=ErrCode.EXCEL_WRITE_COM)
-        finally:
-            if ctx is not None:
-                ctx.__exit__(None, None, None)
     else:
         if wb_actions and new_wb is None:
             return ToolResult.err(
@@ -618,13 +621,13 @@ def structured_actions_tool(
                     for row in new_df.itertuples(index=False):
                         ws.append(list(row))
                 new_wb.save(workspace.path)
-            except Exception as e:
+            except (OSError, PermissionError, ValueError) as e:
                 log.exception("Falha ao salvar arquivo com openpyxl (structured_actions)")
                 return ToolResult.err(f"Erro ao salvar arquivo: {e!s}", code=ErrCode.EXCEL_SAVE_OPENPYXL)
         elif df_actions and new_df is not None and workspace.path:
             try:
                 new_df.to_excel(workspace.path, index=False, engine="openpyxl")
-            except Exception as e:
+            except (OSError, PermissionError, ValueError) as e:
                 log.exception("Falha ao salvar arquivo via to_excel (structured_actions)")
                 return ToolResult.err(f"Erro ao salvar arquivo: {e!s}", code=ErrCode.EXCEL_SAVE_DF)
 

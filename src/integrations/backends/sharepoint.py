@@ -4,6 +4,7 @@ Backend: SharePoint (Microsoft Graph — upload CSV).
 from __future__ import annotations
 
 import os
+import re
 import urllib.parse
 from datetime import datetime
 
@@ -22,6 +23,10 @@ def upload_sharepoint_csv(workspace: Workspace) -> str:
             "SharePoint precisa de configuracao de site.\n"
             f"Defina {SHAREPOINT_SITE_ENV} (e opcionalmente {SHAREPOINT_DRIVE_ENV})."
         )
+    if not re.match(r"^[A-Za-z0-9._-]+$", site_id):
+        return f"SharePoint site_id invalido: {site_id!r}"
+    if drive_id and not re.match(r"^[A-Za-z0-9._-]+$", drive_id):
+        return f"SharePoint drive_id invalido: {drive_id!r}"
     if workspace.df is None:
         return "Nao ha DataFrame carregado para enviar ao SharePoint."
 

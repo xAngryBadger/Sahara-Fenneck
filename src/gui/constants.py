@@ -17,8 +17,19 @@ def _read_version() -> str:
             for line in toml.read_text(encoding="utf-8").splitlines():
                 if line.startswith("version"):
                     return line.split("=", 1)[1].strip().strip('"').strip("'")
-        return "2.0"
+    return "2.0"
 
 
 APP_VERSION = _read_version()
-DEFAULT_MODEL = "qwen2.5:7b"
+
+
+def _get_default_model() -> str:
+    try:
+        from ..agent.llm_client import DEFAULT_OLLAMA_MODEL
+
+        return DEFAULT_OLLAMA_MODEL
+    except Exception:
+        return "qwen2.5:7b"
+
+
+DEFAULT_MODEL = _get_default_model()

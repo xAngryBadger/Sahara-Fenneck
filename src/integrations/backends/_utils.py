@@ -10,7 +10,8 @@ import re
 import unicodedata
 import urllib.error
 import urllib.request
-from functools import lru_cache
+
+from ...config.app_settings import settings_client_ids
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +38,8 @@ def has_word(text: str, word: str) -> bool:
     return bool(re.search(rf"\b{re.escape(word)}\b", text))
 
 
-def http_json(method: str, url: str, headers: dict[str, str], payload: bytes | None = None) -> tuple[int, dict, str]:
+def http_json(method: str, url: str, headers: dict[str, str], payload: bytes | None = None, *, redact_url: bool = False) -> tuple[int, dict, str]:
+    safe_url = re.sub(r"([?&])(key|token)=[^&]+", r"\1\2=***", url) if redact_url else url
     req = urllib.request.Request(url, method=method, data=payload)
     for k, v in headers.items():
         req.add_header(k, v)
@@ -52,9 +54,10 @@ def http_json(method: str, url: str, headers: dict[str, str], payload: bytes | N
         except Exception:
             log.warning("Falha ao ler corpo do erro HTTP: usando representacao string")
             details = str(e)
+        log.debug("HTTP %s %s => %s", method, safe_url, e.code)
         return int(getattr(e, "code", 500)), {}, details
     except Exception as e:
-        log.warning("Erro inesperado na requisicao HTTP: %s", e)
+        log.warning("Erro inesperado na requisicao HTTP %s %s: %s", method, safe_url, e)
         return 500, {}, str(e)
 
 
@@ -64,17 +67,6 @@ def extract_emails(text: str) -> list[str]:
 
 def safe_sheet_name(name: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", name or "planilha")
-
-
-@lru_cache(maxsize=1)
-def settings_client_ids() -> tuple[str, str]:
-    from ...config import load_settings
-    from ..oauth_defaults import get_default_client_id
-
-    cfg = load_settings()
-    google_client_id = str(cfg.get("google_client_id", "") or "").strip() or get_default_client_id("google")
-    microsoft_client_id = str(cfg.get("microsoft_client_id", "") or "").strip() or get_default_client_id("microsoft")
-    return google_client_id, microsoft_client_id
 
 
 def google_token() -> tuple[str, str]:

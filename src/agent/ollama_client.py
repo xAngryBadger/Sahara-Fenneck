@@ -3,18 +3,39 @@ Cliente Ollama para chamadas ao LLM local.
 """
 from __future__ import annotations
 
+import atexit
 import json as _json
 import logging
 import os
 import shutil
 import subprocess
+import threading
 import time
 import urllib.request
 
+from .llm_client import DEFAULT_OLLAMA_MODEL as DEFAULT_MODEL
+
 log = logging.getLogger(__name__)
 
-DEFAULT_MODEL = "qwen2.5:7b"
 OLLAMA_BASE = "http://localhost:11434"
+
+_ollama_process: subprocess.Popen | None = None
+_ollama_lock = threading.Lock()
+
+
+def _cleanup_ollama() -> None:
+    global _ollama_process
+    with _ollama_lock:
+        if _ollama_process is not None:
+            try:
+                _ollama_process.terminate()
+                _ollama_process.wait(timeout=5)
+            except Exception:
+                pass
+            _ollama_process = None
+
+
+atexit.register(_cleanup_ollama)
 
 
 def _check_ollama() -> bool:
@@ -42,13 +63,15 @@ def _find_ollama_exe() -> str | None:
 
 
 def _start_ollama_if_possible(timeout_sec: int = 20) -> bool:
+    global _ollama_process
     if _check_ollama():
         return True
     exe = _find_ollama_exe()
     if not exe:
         return False
     try:
-        subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with _ollama_lock:
+            _ollama_process = subprocess.Popen([exe, "serve"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception:
         log.warning("Falha ao iniciar processo do Ollama")
         return False
@@ -140,4 +163,4 @@ class OllamaClient:
             return str(out.get("response", "")).strip()
         except Exception as e:
             log.exception("Erro ao gerar resposta com Ollama")
-            return f"[Erro Ollama: {e!s}]"
+            raise RuntimeError(f"[E018] Ollama não disponível: {e!s}") from e

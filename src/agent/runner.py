@@ -219,6 +219,15 @@ def _extract_actions(code_text: str) -> str | None:
     return None
 
 
+_KNOWN_ACTION_KINDS = {
+    "sort", "fillna", "replace", "rename_column", "drop_columns",
+    "add_computed_column", "filter_equals", "filter_contains", "filter_range",
+    "dropna", "groupby_agg", "pivot_table", "merge_columns", "strip_whitespace",
+    "change_dtype", "adjust_header", "request_more_rows",
+    "duplicate_sheet", "create_sheet", "delete_sheet", "rename_sheet",
+}
+
+
 def _extract_loose_actions(code_text: str) -> str | None:
     """Accept raw/fenced JSON when smaller models forget [ACTIONS] tags."""
     text = (code_text or "").strip()
@@ -253,9 +262,12 @@ def _extract_loose_actions(code_text: str) -> str | None:
             continue
 
         if isinstance(raw, dict) and isinstance(raw.get("actions"), list) and raw.get("actions"):
-            return candidate
+            actions = raw["actions"]
+            if any(str(a.get("action", "")).strip().lower() in _KNOWN_ACTION_KINDS for a in actions if isinstance(a, dict)):
+                return candidate
         if isinstance(raw, list) and raw and all(isinstance(a, dict) and a.get("action") for a in raw):
-            return candidate
+            if any(str(a.get("action", "")).strip().lower() in _KNOWN_ACTION_KINDS for a in raw):
+                return candidate
 
     return None
 
@@ -364,6 +376,12 @@ def run_agent(
         t0 = time.monotonic()
         switched = _switch_workspace_to_sheet(query, workspace)
         if switched is not workspace:
+            workspace.sheet_name = switched.sheet_name
+            workspace.df = switched.df
+            workspace.columns = switched.columns
+            workspace.row_count = switched.row_count
+            workspace.indexed_rows = switched.indexed_rows
+            workspace.truncated = switched.truncated
             workspace = switched
         client = client or (create_client(settings) if settings else OllamaClient())
         if client.is_available():
@@ -375,7 +393,13 @@ def run_agent(
             context_parts.append(f"Dados da aba ativa:\n{data_summary}")
             context_text = "\n\n".join(context_parts)
             ro_prompt = f"{context_text}\n\nPergunta do usuário: {query}\n\nResponda e, se for aplicar alterações na planilha, prefira [ACTIONS]...[/ACTIONS].\nUse [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estruturadas."
-            response = client.generate(ro_prompt, system=SYSTEM)
+            try:
+                response = client.generate(ro_prompt, system=SYSTEM)
+            except RuntimeError as e:
+                final_answer = str(e)
+                if on_message:
+                    on_message(final_answer)
+                return final_answer
             log.info("[perf] read-only path: %.2fs", time.monotonic() - t0)
             actions_payload = _extract_actions(response) or _extract_loose_actions(response)
             if actions_payload:
@@ -406,9 +430,22 @@ def run_agent(
     refreshed = hydrate_workspace_full(workspace)
     t_hydrate = time.monotonic() - t_start
     if refreshed is not workspace and not refreshed.error:
+        workspace.df = refreshed.df
+        workspace.columns = refreshed.columns
+        workspace.row_count = refreshed.row_count
+        workspace.indexed_rows = refreshed.indexed_rows
+        workspace.truncated = refreshed.truncated
         workspace = refreshed
 
-    workspace = _switch_workspace_to_sheet(query, workspace)
+    switched = _switch_workspace_to_sheet(query, workspace)
+    if switched is not workspace:
+        workspace.sheet_name = switched.sheet_name
+        workspace.df = switched.df
+        workspace.columns = switched.columns
+        workspace.row_count = switched.row_count
+        workspace.indexed_rows = switched.indexed_rows
+        workspace.truncated = switched.truncated
+        workspace = switched
 
     client = client or OllamaClient()
     if not client.is_available():
@@ -450,7 +487,13 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
         if on_progress:
             on_progress(f"Pensando... etapa {step + 1}/{max_steps}")
         t_llm = time.monotonic()
-        response = client.generate("\n\n".join(messages), system=SYSTEM)
+        try:
+            response = client.generate("\n\n".join(messages), system=SYSTEM)
+        except RuntimeError as e:
+            final_answer = str(e)
+            if on_message:
+                on_message(final_answer)
+            break
         t_llm_elapsed = time.monotonic() - t_llm
 
         actions_payload = _extract_actions(response) or _extract_loose_actions(response)
@@ -495,6 +538,7 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
                 checkpoint_saved_for_order = True
 
             if result.success:
+                _cached_sheet_names.cache_clear()
                 if result.message == "__REQUEST_MORE_ROWS__":
                     if on_progress:
                         on_progress("Carregando mais dados...")

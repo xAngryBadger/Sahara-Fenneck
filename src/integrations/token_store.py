@@ -6,17 +6,19 @@ No Windows, usa DPAPI via win32crypt para proteger os dados em repouso.
 from __future__ import annotations
 
 import base64
-import hashlib
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 from typing import Any
 
 from ..config.app_settings import get_settings_path
-from ..errcodes import ErrCode
+from ..errcodes import ErrCode, err_str
 
 log = logging.getLogger(__name__)
+
+_token_lock = threading.Lock()
 
 
 def _tokens_path() -> Path:
@@ -30,9 +32,7 @@ def _fernet_key() -> bytes:
     ``~/.sahara_fennec/.enc_key`` (or ``%APPDATA%/SaharaFennec/.enc_key`` on Windows).
     The key file is protected by OS file permissions (0600 on POSIX).
 
-    Falls back to a machine-identity-derived key only when the key file is
-    inaccessible (e.g. read-only filesystem), which is still better than
-    plaintext but not as strong as a random key.
+    Raises RuntimeError if the key file cannot be created or read.
     """
     key_path = get_settings_path().parent / ".enc_key"
 
@@ -55,11 +55,7 @@ def _fernet_key() -> bytes:
             pass
         return b64
     except Exception:
-        log.warning("Cannot write random key file, falling back to machine-identity key")
-
-    identity = f"{os.getenv('USERNAME', 'user')}@{os.getenv('COMPUTERNAME', os.getenv('HOSTNAME', 'localhost'))}"
-    raw = hashlib.sha256(identity.encode("utf-8")).digest()
-    return base64.urlsafe_b64encode(raw)
+        raise RuntimeError(err_str(ErrCode.ENCRYPTION_FAILED, "Cannot create or read encryption key file")) from None
 
 
 def _protect(raw: bytes) -> tuple[bytes, str]:
@@ -163,22 +159,25 @@ def _save_all(data: dict[str, Any]) -> None:
 
 
 def get_provider_token(provider: str) -> dict[str, Any] | None:
-    all_data = _load_all()
+    with _token_lock:
+        all_data = _load_all()
     token = all_data.get(provider)
     return token if isinstance(token, dict) else None
 
 
 def set_provider_token(provider: str, token_data: dict[str, Any]) -> None:
-    all_data = _load_all()
-    all_data[provider] = token_data
-    _save_all(all_data)
+    with _token_lock:
+        all_data = _load_all()
+        all_data[provider] = token_data
+        _save_all(all_data)
 
 
 def clear_provider_token(provider: str) -> None:
-    all_data = _load_all()
-    if provider in all_data:
-        del all_data[provider]
-    _save_all(all_data)
+    with _token_lock:
+        all_data = _load_all()
+        if provider in all_data:
+            del all_data[provider]
+        _save_all(all_data)
 
 
 def get_nim_api_key() -> str:

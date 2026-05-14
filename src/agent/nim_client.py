@@ -4,11 +4,9 @@ from __future__ import annotations
 import logging
 
 from ..errcodes import ErrCode, err_str
+from .llm_client import DEFAULT_NIM_BASE_URL, DEFAULT_NIM_MODEL
 
 log = logging.getLogger(__name__)
-
-DEFAULT_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
-DEFAULT_NIM_MODEL = "meta/llama-3.1-70b-instruct"
 
 
 class NimClient:
@@ -48,10 +46,7 @@ class NimClient:
             return False
 
     def generate(self, prompt: str, system: str | None = None, max_tokens: int = 2048) -> str:
-        try:
-            client = self._get_client()
-        except RuntimeError as e:
-            return str(e)
+        client = self._get_client()
 
         messages = []
         if system:
@@ -70,5 +65,5 @@ class NimClient:
         except Exception as e:
             err_msg = str(e).lower()
             if "auth" in err_msg or "401" in err_msg or "api_key" in err_msg or "invalid" in err_msg:
-                return err_str(ErrCode.NIM_AUTH_FAILED, str(e))
-            return err_str(ErrCode.NIM_REQUEST_FAILED, str(e))
+                raise RuntimeError(err_str(ErrCode.NIM_AUTH_FAILED, str(e))) from e
+            raise RuntimeError(err_str(ErrCode.NIM_REQUEST_FAILED, str(e))) from e

@@ -74,10 +74,7 @@ def _http_form_post(url: str, data: dict[str, str]) -> tuple[int, dict[str, Any]
         try:
             details = getattr(e, "read")().decode("utf-8", errors="replace")
         except Exception:
-            log.exception("Falha ao ler detalhes do erro HTTP")
             details = str(e)
-        code = int(getattr(e, "code", 500))
-        return code, {}, details
         code = int(getattr(e, "code", 500))
         return code, {}, details
 
@@ -148,7 +145,7 @@ def _start_callback_server(expected_state: str) -> tuple[HTTPServer, threading.T
     result = _OAuthResult()
 
     class Handler(BaseHTTPRequestHandler):
-        def do_GET(self):  # noqa: N802 (API do BaseHTTPRequestHandler)
+        def do_GET(self): # noqa: N802 (API do BaseHTTPRequestHandler)
             parsed = urllib.parse.urlparse(self.path)
             query = urllib.parse.parse_qs(parsed.query)
             state = (query.get("state") or [""])[0]
@@ -156,6 +153,7 @@ def _start_callback_server(expected_state: str) -> tuple[HTTPServer, threading.T
             error = (query.get("error") or [""])[0]
 
             if state != expected_state:
+                log.warning("OAuth callback: state mismatch (expected=%s, got=%s)", expected_state[:8], state[:8] if state else "(empty)")
                 result.error = "state mismatch"
                 self.send_response(400)
                 self.end_headers()
@@ -212,8 +210,6 @@ def connect_provider(provider: str, client_id: str) -> str:
     state = secrets.token_urlsafe(24)
 
     server, _t, result, port = _start_callback_server(state)
-    if port <= 0:
-        return "Falha ao iniciar servidor local para callback OAuth."
 
     redirect_uri = f"http://127.0.0.1:{port}/callback"
     query = {
@@ -240,12 +236,12 @@ def connect_provider(provider: str, client_id: str) -> str:
         return f"Falha ao abrir navegador automaticamente. Abra manualmente:\n{auth_url}{tail}"
 
     done = result.event.wait(180)
-    if not done and not result.error:
-        result.error = "timeout no callback OAuth"
     try:
         server.server_close()
     except Exception:
         pass
+    if not done and not result.error:
+        result.error = "timeout no callback OAuth"
 
     code = str(result.code or "")
     err = str(result.error or "")

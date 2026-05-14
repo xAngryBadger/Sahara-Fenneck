@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import smtplib
+import ssl
 from email.message import EmailMessage
 
 from ...indexing import Workspace, get_workspace_summary
@@ -68,7 +69,7 @@ def send_gmail_summary(query: str, workspace: Workspace) -> str:
     msg.set_content(body)
     try:
         with smtplib.SMTP("smtp.gmail.com", 587, timeout=30) as smtp:
-            smtp.starttls()
+            smtp.starttls(context=ssl.create_default_context())
             smtp.login(user, password)
             smtp.send_message(msg)
         return f"E-mail enviado via SMTP para: {', '.join(recipients)}."

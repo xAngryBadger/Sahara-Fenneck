@@ -8,6 +8,7 @@ from collections.abc import Callable
 import customtkinter as ctk
 
 from ..agent.llm_client import create_client
+from ..agent.runner import run_agent
 from ..config import load_settings
 from . import styles as s
 from .chat_bubbles import FennecBubble, UserBubble
@@ -71,8 +72,6 @@ class ChatController:
 
         def run():
             try:
-                from src.agent.runner import run_agent
-
                 client = create_client(settings)
 
                 def _safe_after(fn):

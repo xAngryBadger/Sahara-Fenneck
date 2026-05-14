@@ -16,7 +16,7 @@ def trello_list_boards() -> str:
     if err:
         return err
     url = f"https://api.trello.com/1/members/me/boards?fields=name,url&key={urllib.parse.quote(key)}&token={urllib.parse.quote(token)}"
-    status, data, details = http_json("GET", url, {"Accept": "application/json"})
+    status, data, details = http_json("GET", url, {"Accept": "application/json"}, redact_url=True)
     if not (200 <= status < 300):
         return f"Falha ao listar quadros Trello (status={status}). {details[:300]}"
     if not isinstance(data, list):

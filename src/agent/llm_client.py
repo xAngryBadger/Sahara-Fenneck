@@ -9,6 +9,11 @@ from ..errcodes import ErrCode, err_str
 log = logging.getLogger(__name__)
 
 
+DEFAULT_OLLAMA_MODEL = "qwen2.5:7b"
+DEFAULT_NIM_BASE_URL = "https://integrate.api.nvidia.com/v1"
+DEFAULT_NIM_MODEL = "meta/llama-3.1-70b-instruct"
+
+
 @runtime_checkable
 class LLMClient(Protocol):
     def is_available(self) -> bool: ...
@@ -24,8 +29,8 @@ def create_client(settings: dict) -> LLMClient:
         from .nim_client import NimClient
 
         api_key = (get_nim_api_key() or os.getenv("NVIDIA_API_KEY", "")).strip()
-        base_url = (settings.get("nim_base_url") or "https://integrate.api.nvidia.com/v1").strip()
-        model = (settings.get("nim_model") or "meta/llama-3.1-70b-instruct").strip()
+        base_url = (settings.get("nim_base_url") or DEFAULT_NIM_BASE_URL).strip()
+        model = (settings.get("nim_model") or DEFAULT_NIM_MODEL).strip()
 
         client = NimClient(api_key=api_key, model=model, base_url=base_url)
         if not api_key:
@@ -34,5 +39,5 @@ def create_client(settings: dict) -> LLMClient:
 
     from .ollama_client import OllamaClient
 
-    model = (settings.get("model") or "qwen2.5:7b").strip()
+    model = (settings.get("model") or DEFAULT_OLLAMA_MODEL).strip()
     return OllamaClient(model=model)
