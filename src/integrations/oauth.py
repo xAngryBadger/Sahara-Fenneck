@@ -59,6 +59,15 @@ PROVIDERS: dict[str, dict[str, Any]] = {
     },
 }
 
+_VALID_PROVIDERS = frozenset(PROVIDERS)
+
+
+def _validate_provider(provider: str) -> str:
+    p = provider.strip().lower()
+    if p not in _VALID_PROVIDERS:
+        raise ValueError(f"Provider OAuth invalido: {p!r}. Validos: {', '.join(sorted(_VALID_PROVIDERS))}")
+    return p
+
 
 def _http_form_post(url: str, data: dict[str, str]) -> tuple[int, dict[str, Any], str]:
     encoded = urllib.parse.urlencode(data).encode("utf-8")
@@ -195,10 +204,11 @@ def _start_callback_server(expected_state: str) -> tuple[HTTPServer, threading.T
 
 
 def connect_provider(provider: str, client_id: str) -> str:
-    provider = provider.strip().lower()
-    cfg = PROVIDERS.get(provider)
-    if not cfg:
-        return f"Provider OAuth invalido: {provider}"
+    try:
+        provider = _validate_provider(provider)
+    except ValueError as e:
+        return str(e)
+    cfg = PROVIDERS[provider]
     cid = (client_id or "").strip() or get_default_client_id(provider)
     if not cid:
         return (
@@ -286,9 +296,11 @@ def connect_provider(provider: str, client_id: str) -> str:
 
 
 def _refresh_provider_token(provider: str, token_data: dict[str, Any], client_id: str) -> tuple[bool, str]:
-    cfg = PROVIDERS.get(provider)
-    if not cfg:
-        return False, "provider invalido"
+    try:
+        provider = _validate_provider(provider)
+    except ValueError as e:
+        return False, str(e)
+    cfg = PROVIDERS[provider]
     refresh_token = str(token_data.get("refresh_token") or "")
     if not refresh_token:
         return False, "refresh token ausente; reconecte o OAuth."
@@ -326,7 +338,10 @@ def _refresh_provider_token(provider: str, token_data: dict[str, Any], client_id
 
 def get_access_token(provider: str, client_id: str) -> tuple[str, str]:
     """Retorna (token, erro)."""
-    provider = provider.strip().lower()
+    try:
+        provider = _validate_provider(provider)
+    except ValueError as e:
+        return "", str(e)
     token_data = get_provider_token(provider)
     if not token_data:
         return "", f"{provider} nao conectado. Use Configuracoes > Conectar {provider.capitalize()}."
@@ -349,12 +364,20 @@ def get_access_token(provider: str, client_id: str) -> tuple[str, str]:
 
 
 def disconnect_provider(provider: str) -> str:
-    clear_provider_token(provider.strip().lower())
+    try:
+        provider = _validate_provider(provider)
+    except ValueError:
+        provider = provider.strip().lower()
+    clear_provider_token(provider)
     return f"Conexao {provider} removida."
 
 
 def provider_status(provider: str) -> str:
-    token_data = get_provider_token(provider.strip().lower())
+    try:
+        provider = _validate_provider(provider)
+    except ValueError:
+        return "Nao conectado"
+    token_data = get_provider_token(provider)
     if not token_data:
         return "Nao conectado"
     expires_at = int(token_data.get("expires_at") or 0)

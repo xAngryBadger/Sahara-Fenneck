@@ -22,6 +22,7 @@ from ..indexing.excel_reader import (
     index_from_path,
 )
 from ..integrations import handle_integration_query
+from .actions import KNOWN_ACTION_KINDS
 from .llm_client import LLMClient, create_client
 from .ollama_client import OllamaClient
 from .tools import structured_actions_tool
@@ -170,6 +171,21 @@ def _switch_workspace_to_sheet(query: str, workspace: Workspace) -> Workspace:
     return workspace
 
 
+_SYSTEM_SUMMARY: dict[int, tuple[int, int, str]] = {}
+
+
+def _cached_workspace_summary(workspace: Workspace) -> str:
+    ws_id = id(workspace)
+    df_len = len(workspace.df) if workspace.df is not None else -1
+    cols_hash = hash(tuple(workspace.columns)) if workspace.columns else 0
+    cached = _SYSTEM_SUMMARY.get(ws_id)
+    if cached and cached[0] == df_len and cached[1] == cols_hash:
+        return cached[2]
+    summary = get_workspace_summary(workspace)
+    _SYSTEM_SUMMARY[ws_id] = (df_len, cols_hash, summary)
+    return summary
+
+
 SYSTEM = """Você é o Fennec, assistente de planilhas Excel. Responda SEMPRE em português.
 
 IMPORTANTE: Use blocos de ferramenta SOMENTE quando o usuário pedir para MODIFICAR a planilha.
@@ -219,13 +235,6 @@ def _extract_actions(code_text: str) -> str | None:
     return None
 
 
-_KNOWN_ACTION_KINDS = {
-    "sort", "fillna", "replace", "rename_column", "drop_columns",
-    "add_computed_column", "filter_equals", "filter_contains", "filter_range",
-    "dropna", "groupby_agg", "pivot_table", "merge_columns", "strip_whitespace",
-    "change_dtype", "adjust_header", "request_more_rows",
-    "duplicate_sheet", "create_sheet", "delete_sheet", "rename_sheet",
-}
 
 
 def _extract_loose_actions(code_text: str) -> str | None:
@@ -263,10 +272,10 @@ def _extract_loose_actions(code_text: str) -> str | None:
 
         if isinstance(raw, dict) and isinstance(raw.get("actions"), list) and raw.get("actions"):
             actions = raw["actions"]
-            if any(str(a.get("action", "")).strip().lower() in _KNOWN_ACTION_KINDS for a in actions if isinstance(a, dict)):
+            if any(str(a.get("action", "")).strip().lower() in KNOWN_ACTION_KINDS for a in actions if isinstance(a, dict)):
                 return candidate
         if isinstance(raw, list) and raw and all(isinstance(a, dict) and a.get("action") for a in raw):
-            if any(str(a.get("action", "")).strip().lower() in _KNOWN_ACTION_KINDS for a in raw):
+            if any(str(a.get("action", "")).strip().lower() in KNOWN_ACTION_KINDS for a in raw):
                 return candidate
 
     return None
@@ -389,7 +398,7 @@ def run_agent(
             if _is_workbook_broad_query(query, workspace):
                 overview = get_workbook_overview(workspace.path)
                 context_parts.append(overview)
-            data_summary = get_workspace_summary(workspace)
+            data_summary = _cached_workspace_summary(workspace)
             context_parts.append(f"Dados da aba ativa:\n{data_summary}")
             context_text = "\n\n".join(context_parts)
             ro_prompt = f"{context_text}\n\nPergunta do usuário: {query}\n\nResponda e, se for aplicar alterações na planilha, prefira [ACTIONS]...[/ACTIONS].\nUse [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estruturadas."
@@ -401,23 +410,42 @@ def run_agent(
                     on_message(final_answer)
                 return final_answer
             log.info("[perf] read-only path: %.2fs", time.monotonic() - t0)
-            actions_payload = _extract_actions(response) or _extract_loose_actions(response)
-            if actions_payload:
-                cp = CheckpointManager(workspace.path, interaction_label="Otimização")
-                result = structured_actions_tool(
-                    workspace, actions_payload, cp, save_checkpoint=False,
-                )
-                if result.success:
-                    clean_text = _strip_tool_payload_from_response(response, actions_payload, "ACTIONS")
-                    final_answer = (clean_text + "\n\n" + result.message).strip()
+        actions_payload = _extract_actions(response) or _extract_loose_actions(response)
+        if actions_payload:
+            try:
+                _raw = json.loads(actions_payload)
+                _acts = _raw.get("actions", []) if isinstance(_raw, dict) else _raw
+                if isinstance(_acts, list) and not _acts:
+                    actions_payload = None
+            except Exception:
+                log.debug("Falha ao validar lista de acoes (read-only path)")
+        if actions_payload:
+            if on_confirm_change:
+                preview = _summarize_actions(actions_payload, workspace)
+                approved = on_confirm_change(preview)
+                if not approved:
+                    clean = re.sub(r"\[/?(?:ACTIONS|OPTIMIZE)\]", "", response).strip()
+                    if not clean:
+                        clean = "Operacao cancelada. Nenhuma alteracao foi aplicada na planilha."
                     if on_message:
-                        on_message(final_answer)
-                    return final_answer
-            clean = re.sub(r"\[/?(?:ACTIONS|OPTIMIZE)\]", "", response).strip()
-            if clean:
+                        on_message(clean)
+                    return clean
+
+            cp = CheckpointManager(workspace.path, interaction_label="Otimização")
+            result = structured_actions_tool(
+                workspace, actions_payload, cp, save_checkpoint=False,
+            )
+            if result.success:
+                clean_text = _strip_tool_payload_from_response(response, actions_payload, "ACTIONS")
+                final_answer = (clean_text + "\n\n" + result.message).strip()
                 if on_message:
-                    on_message(clean)
-                return clean
+                    on_message(final_answer)
+                return final_answer
+        clean = re.sub(r"\[/?(?:ACTIONS|OPTIMIZE)\]", "", response).strip()
+        if clean:
+            if on_message:
+                on_message(clean)
+            return clean
 
     if workspace.error:
         msg = err_str(ErrCode.WORKSPACE_ERROR, workspace.error or "")
@@ -466,7 +494,7 @@ def run_agent(
     if _is_workbook_broad_query(query, workspace):
         overview = get_workbook_overview(workspace.path)
         context_block = overview + "\n\n"
-    data_summary = get_workspace_summary(workspace)
+    data_summary = _cached_workspace_summary(workspace)
     prompt = f"""{context_block}Dados atuais da aba ativa:
 {data_summary}
 
@@ -503,11 +531,7 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
                 _raw = json.loads(actions_payload)
                 _acts = _raw.get("actions", []) if isinstance(_raw, dict) else _raw
                 if isinstance(_acts, list) and not _acts:
-                    # Empty actions list — skip confirmation and tell user
-                    if on_message:
-                        on_message("O modelo não gerou ações válidas. Tente reformular seu pedido.")
-                    messages.append(response)
-                    messages.append("Resultado: A lista de ações estava vazia. Gere ações válidas.")
+                    messages.append("Resultado: A lista de ações estava vazia. Gere ações válidas com pelo menos uma ação.")
                     continue
             except Exception:
                 log.exception("Falha ao validar lista de acoes")
@@ -532,7 +556,7 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
                 cp,
                 on_checkpoint_saved=on_checkpoint if save_checkpoint_now else None,
                 save_checkpoint=save_checkpoint_now,
-            )
+        )
             t_tool_elapsed = time.monotonic() - t_tool
             if save_checkpoint_now and result.success:
                 checkpoint_saved_for_order = True
@@ -548,7 +572,7 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
                         workspace.row_count = refreshed.row_count
                         workspace.indexed_rows = refreshed.indexed_rows
                         workspace.truncated = refreshed.truncated
-                    data_summary = get_workspace_summary(workspace)
+                    data_summary = _cached_workspace_summary(workspace)
                     messages.append(response)
                     messages.append(f"Mais dados carregados. Dados atuais:\n{data_summary}\nResponda novamente com base nos dados completos.")
                     continue
@@ -560,7 +584,7 @@ Use [OPTIMIZE] apenas se a tarefa não puder ser representada pelas ações estr
                         offset = 0
                     if offset > 0:
                         workspace = apply_header_offset(workspace, offset)
-                    data_summary = get_workspace_summary(workspace)
+                    data_summary = _cached_workspace_summary(workspace)
                     messages.append(response)
                     messages.append(f"Cabeçalho ajustado para linha {offset + 1}. Novos dados:\n{data_summary}\nResponda novamente com os cabeçalhos corrigidos.")
                     continue

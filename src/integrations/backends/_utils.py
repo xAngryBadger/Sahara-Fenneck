@@ -28,6 +28,12 @@ SHAREPOINT_SITE_ENV = "FENNEC_SHAREPOINT_SITE_ID"
 SHAREPOINT_DRIVE_ENV = "FENNEC_SHAREPOINT_DRIVE_ID"
 OUTLOOK_TO_ENV = "FENNEC_OUTLOOK_TO"
 
+_ERR_PREFIX = "\u26a0 "
+
+
+def _err_msg(service: str, detail: str) -> str:
+    return f"{_ERR_PREFIX}{service}: {detail}"
+
 
 def normalize(text: str) -> str:
     value = unicodedata.normalize("NFD", (text or "").lower())

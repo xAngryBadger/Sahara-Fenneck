@@ -97,6 +97,15 @@ def fake_ollama():
 
 
 @pytest.fixture
+def fake_nim():
+    """Mock NimClient that returns scripted responses."""
+    client = MagicMock()
+    client.model = "test-nim-model"
+    client.is_available.return_value = True
+    return client
+
+
+@pytest.fixture
 def sample_xlsx(tmp_path):
     """Create a sample .xlsx file and return its path."""
     df = pd.DataFrame(

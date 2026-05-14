@@ -34,6 +34,7 @@ class TestFernetKey:
     @patch.dict(os.environ, {"USERNAME": "testuser", "COMPUTERNAME": "testhost"})
     def test_raises_when_key_file_unwritable(self, tmp_path):
         from unittest.mock import patch
+
         import pytest
         settings_path = tmp_path / "readonly" / "settings.json"
         with patch("src.integrations.token_store.get_settings_path", return_value=settings_path), \
@@ -42,8 +43,8 @@ class TestFernetKey:
                 _fernet_key()
 
     def test_uses_key_file_when_present(self, tmp_path):
-        from unittest.mock import patch
         import os as _os
+        from unittest.mock import patch
         stored = base64.urlsafe_b64encode(_os.urandom(32))
         key_path = tmp_path / "sf" / ".enc_key"
         key_path.parent.mkdir(parents=True, exist_ok=True)
