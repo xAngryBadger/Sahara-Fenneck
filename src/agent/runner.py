@@ -8,6 +8,7 @@ import json
 import logging
 import re
 import time
+import weakref
 from collections.abc import Callable
 from functools import lru_cache
 
@@ -171,18 +172,17 @@ def _switch_workspace_to_sheet(query: str, workspace: Workspace) -> Workspace:
     return workspace
 
 
-_SYSTEM_SUMMARY: dict[int, tuple[int, int, str]] = {}
+_SYSTEM_SUMMARY: weakref.WeakKeyDictionary[Workspace, tuple[int, int, str]] = weakref.WeakKeyDictionary()
 
 
 def _cached_workspace_summary(workspace: Workspace) -> str:
-    ws_id = id(workspace)
     df_len = len(workspace.df) if workspace.df is not None else -1
     cols_hash = hash(tuple(workspace.columns)) if workspace.columns else 0
-    cached = _SYSTEM_SUMMARY.get(ws_id)
+    cached = _SYSTEM_SUMMARY.get(workspace)
     if cached and cached[0] == df_len and cached[1] == cols_hash:
         return cached[2]
     summary = get_workspace_summary(workspace)
-    _SYSTEM_SUMMARY[ws_id] = (df_len, cols_hash, summary)
+    _SYSTEM_SUMMARY[workspace] = (df_len, cols_hash, summary)
     return summary
 
 
@@ -410,7 +410,13 @@ def run_agent(
                     on_message(final_answer)
                 return final_answer
             log.info("[perf] read-only path: %.2fs", time.monotonic() - t0)
-        actions_payload = _extract_actions(response) or _extract_loose_actions(response)
+            actions_payload = _extract_actions(response) or _extract_loose_actions(response)
+        else:
+            data_summary = _cached_workspace_summary(workspace)
+            local_answer = f"{data_summary}\n\n(LLM indisponível — resposta local baseada nos dados indexados.)"
+            if on_message:
+                on_message(local_answer)
+            return local_answer
         if actions_payload:
             try:
                 _raw = json.loads(actions_payload)
@@ -476,13 +482,14 @@ def run_agent(
         workspace = switched
 
     client = client or OllamaClient()
+    if not _MODIFY_SIGNALS.search(query):
+        integration_reply = handle_integration_query(query, workspace)
+        if integration_reply is not None:
+            if on_message:
+                on_message(integration_reply)
+            return integration_reply
+
     if not client.is_available():
-        if not _MODIFY_SIGNALS.search(query):
-            integration_reply = handle_integration_query(query, workspace)
-            if integration_reply is not None:
-                if on_message:
-                    on_message(integration_reply)
-                return integration_reply
         msg = err_str(ErrCode.OLLAMA_UNAVAILABLE, "Verifique se o Ollama está instalado e tente abrir o Fennec novamente.")
         if on_message:
             on_message(msg)

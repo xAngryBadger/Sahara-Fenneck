@@ -337,16 +337,21 @@ class SettingsController:
             self._nim_base_url.set(nim_url_var.get().strip())
             self._nim_model.set(nim_model_var.get().strip())
 
-            new_key = nim_key_var.get().strip()
-            if new_key:
-                try:
-                    set_nim_api_key(new_key)
-                except Exception:
-                    log.exception("Falha ao salvar API key do NIM")
+        new_key = nim_key_var.get().strip()
+        key_err = False
+        if new_key:
+            try:
+                set_nim_api_key(new_key)
+            except Exception:
+                log.exception("Falha ao salvar API key do NIM")
+                key_err = True
 
-            self._on_save_settings({})
+        self._on_save_settings({})
+        if key_err:
+            self._status_var.set("Configurações salvas, mas falha ao salvar API key do NIM.")
+        else:
             self._status_var.set("Configurações salvas.")
-            win.destroy()
+        win.destroy()
 
         ctk.CTkButton(footer, text="Aplicar recomendado", command=apply_recommended, **_btn_style).pack(side="left")
         ctk.CTkButton(footer, text="Salvar", command=save_and_close, **_btn_style).pack(side="right")

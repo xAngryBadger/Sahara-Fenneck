@@ -72,10 +72,6 @@ def settings_client_ids() -> tuple[str, str]:
     return google_client_id, microsoft_client_id
 
 
-def settings_client_ids_cache_clear() -> None:
-    settings_client_ids.cache_clear()
-
-
 def save_settings(settings: dict[str, Any]) -> None:
     global _SETTINGS_MTIME
     with _SETTINGS_LOCK:

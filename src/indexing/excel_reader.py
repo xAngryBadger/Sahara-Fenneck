@@ -37,17 +37,29 @@ def _normalize_limit(max_rows: int) -> int | None:
 class Workspace:
     """Representa uma aba indexada para uso do agente."""
 
-    path: str
-    workbook_name: str
-    sheet_name: str
-    columns: list[str]
-    row_count: int  # total de linhas de dados na aba
-    indexed_rows: int  # linhas efetivamente carregadas para o contexto
-    truncated: bool = False
-    df: pd.DataFrame | None = None
-    excel_live: bool = False  # True quando veio de Excel aberto (COM)
-    excel_book_name: str | None = None
-    error: str | None = None
+    __slots__ = (
+        "__weakref__",
+        "path", "workbook_name", "sheet_name", "columns",
+        "row_count", "indexed_rows", "truncated", "df",
+        "excel_live", "excel_book_name", "error",
+    )
+
+    def __init__(self, *, truncated: bool = False, df: pd.DataFrame | None = None,
+                 excel_live: bool = False, excel_book_name: str | None = None,
+                 error: str | None = None, **kw):
+        self.truncated = truncated
+        self.df = df
+        self.excel_live = excel_live
+        self.excel_book_name = excel_book_name
+        self.error = error
+        for k, v in kw.items():
+            setattr(self, k, v)
+
+    def __hash__(self):
+        return id(self)
+
+    def __eq__(self, other):
+        return self is other
 
     def summary_one_line(self) -> str:
         if self.error:

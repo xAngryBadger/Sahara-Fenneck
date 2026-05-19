@@ -208,91 +208,95 @@ def connect_provider(provider: str, client_id: str) -> str:
         provider = _validate_provider(provider)
     except ValueError as e:
         return str(e)
-    cfg = PROVIDERS[provider]
-    cid = (client_id or "").strip() or get_default_client_id(provider)
-    if not cid:
-        return (
-            f"Nenhum Client ID configurado para {provider}. "
-            "Crie credenciais OAuth no Google Cloud / Azure e adicione em Configurações > Avançado."
-        )
+    try:
+        cfg = PROVIDERS[provider]
+        cid = (client_id or "").strip() or get_default_client_id(provider)
+        if not cid:
+            return (
+                f"Nenhum Client ID configurado para {provider}. "
+                "Crie credenciais OAuth no Google Cloud / Azure e adicione em Configurações > Avançado."
+            )
 
-    code_verifier, code_challenge = _new_pkce()
-    state = secrets.token_urlsafe(24)
+        code_verifier, code_challenge = _new_pkce()
+        state = secrets.token_urlsafe(24)
 
-    server, _t, result, port = _start_callback_server(state)
+        server, _t, result, port = _start_callback_server(state)
 
-    redirect_uri = f"http://127.0.0.1:{port}/callback"
-    query = {
-        "response_type": "code",
-        "client_id": cid,
-        "redirect_uri": redirect_uri,
-        "scope": " ".join(cfg["scopes"]),
-        "state": state,
-        "code_challenge": code_challenge,
-        "code_challenge_method": "S256",
-    }
-    query.update(cfg.get("extra_auth", {}))
-    auth_url = f"{cfg['auth_url']}?{urllib.parse.urlencode(query)}"
+        redirect_uri = f"http://127.0.0.1:{port}/callback"
+        query = {
+            "response_type": "code",
+            "client_id": cid,
+            "redirect_uri": redirect_uri,
+            "scope": " ".join(cfg["scopes"]),
+            "state": state,
+            "code_challenge": code_challenge,
+            "code_challenge_method": "S256",
+        }
+        query.update(cfg.get("extra_auth", {}))
+        auth_url = f"{cfg['auth_url']}?{urllib.parse.urlencode(query)}"
 
-    opened, open_err = _open_auth_url(auth_url)
-    if not opened:
-        result.error = "falha ao abrir navegador"
-        result.event.set()
+        opened, open_err = _open_auth_url(auth_url)
+        if not opened:
+            result.error = "falha ao abrir navegador"
+            result.event.set()
+            try:
+                server.server_close()
+            except Exception:
+                pass
+            tail = f"\nDetalhes: {open_err}" if open_err else ""
+            return f"Falha ao abrir navegador automaticamente. Abra manualmente:\n{auth_url}{tail}"
+
+        done = result.event.wait(180)
         try:
             server.server_close()
         except Exception:
             pass
-        tail = f"\nDetalhes: {open_err}" if open_err else ""
-        return f"Falha ao abrir navegador automaticamente. Abra manualmente:\n{auth_url}{tail}"
+        if not done and not result.error:
+            result.error = "timeout no callback OAuth"
 
-    done = result.event.wait(180)
-    try:
-        server.server_close()
-    except Exception:
-        pass
-    if not done and not result.error:
-        result.error = "timeout no callback OAuth"
+        code = str(result.code or "")
+        err = str(result.error or "")
+        if not code:
+            return f"Falha no OAuth {provider}: {err or 'codigo nao recebido'}"
 
-    code = str(result.code or "")
-    err = str(result.error or "")
-    if not code:
-        return f"Falha no OAuth {provider}: {err or 'codigo nao recebido'}"
-
-    token_payload = {
-        "grant_type": "authorization_code",
-        "code": code,
-        "redirect_uri": redirect_uri,
-        "client_id": cid,
-        "code_verifier": code_verifier,
-    }
-    if provider == "microsoft":
-        token_payload["scope"] = " ".join(cfg["scopes"])
-
-    status, token_data, details = _http_form_post(cfg["token_url"], token_payload)
-    if not (200 <= status < 300):
-        return f"Falha ao obter token de {provider} (status={status}). {details[:300]}"
-
-    access_token = str(token_data.get("access_token") or "")
-    refresh_token = str(token_data.get("refresh_token") or "")
-    expires_in = int(token_data.get("expires_in") or 0)
-    if not access_token:
-        return f"OAuth {provider} nao retornou access_token."
-
-    now = int(time.time())
-    set_provider_token(
-        provider,
-        {
-            "provider": provider,
+        token_payload = {
+            "grant_type": "authorization_code",
+            "code": code,
+            "redirect_uri": redirect_uri,
             "client_id": cid,
-            "access_token": access_token,
-            "refresh_token": refresh_token,
-            "expires_at": now + max(60, expires_in - 30),
-            "scopes": cfg["scopes"],
-            "token_url": cfg["token_url"],
-            "updated_at": now,
-        },
-    )
-    return f"Conexao OAuth de {provider} concluida com sucesso."
+            "code_verifier": code_verifier,
+        }
+        if provider == "microsoft":
+            token_payload["scope"] = " ".join(cfg["scopes"])
+
+        status, token_data, details = _http_form_post(cfg["token_url"], token_payload)
+        if not (200 <= status < 300):
+            return f"Falha ao obter token de {provider} (status={status}). {details[:300]}"
+
+        access_token = str(token_data.get("access_token") or "")
+        refresh_token = str(token_data.get("refresh_token") or "")
+        expires_in = int(token_data.get("expires_in") or 0)
+        if not access_token:
+            return f"OAuth {provider} nao retornou access_token."
+
+        now = int(time.time())
+        set_provider_token(
+            provider,
+            {
+                "provider": provider,
+                "client_id": cid,
+                "access_token": access_token,
+                "refresh_token": refresh_token,
+                "expires_at": now + max(60, expires_in - 30),
+                "scopes": cfg["scopes"],
+                "token_url": cfg["token_url"],
+                "updated_at": now,
+            },
+        )
+        return f"Conexao OAuth de {provider} concluida com sucesso."
+    except Exception as exc:
+        log.exception("Erro inesperado durante OAuth connect para %s", provider)
+        return f"Erro durante conexao OAuth de {provider}: {exc}"
 
 
 def _refresh_provider_token(provider: str, token_data: dict[str, Any], client_id: str) -> tuple[bool, str]:

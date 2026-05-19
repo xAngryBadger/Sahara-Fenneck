@@ -93,6 +93,13 @@ def _validate_code(code: str) -> tuple[bool, str]:
                 return False, "Acesso a atributos internos (__dunder__) não é permitido."
             if attr in FORBIDDEN_NAMES:
                 return False, f"Acesso a atributo não permitido: {attr}"
+            depth = 0
+            cur = node
+            while isinstance(cur, ast.Attribute):
+                depth += 1
+                cur = cur.value
+            if depth > 3:
+                return False, f"Cadeia de atributos muito longa (max 3): profundidade={depth}"
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in FORBIDDEN_NAMES:
             return False, f"Função não permitida: {node.func.id}"
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):

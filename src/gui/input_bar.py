@@ -14,10 +14,6 @@ class InputBar(ctk.CTkFrame):
         self.on_send = on_send
         self._build()
 
-    def set_text(self, text: str):
-        self.entry.delete(0, "end")
-        self.entry.insert(0, text)
-
     def _build(self):
         self.entry = ctk.CTkEntry(
             self,

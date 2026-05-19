@@ -88,7 +88,7 @@ class ChatController:
                     _safe_after(lambda s=status: self._status_var.set(s))
 
                 kwargs = dict(
-                    text=text,
+                    query=text,
                     workspace=ws,
                     client=client,
                     settings=settings,

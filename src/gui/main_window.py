@@ -456,6 +456,7 @@ class MainWindow:
             llm_backend=self._llm_backend.get(),
             nim_base_url=self._nim_base_url.get(),
             nim_model=self._nim_model.get(),
+            on_confirm_change=self._chat.confirm_change_blocking,
         )
 
     def _on_checkpoints(self):
@@ -491,10 +492,21 @@ class MainWindow:
             row.pack(fill="x", pady=2)
             ctk.CTkLabel(row, text=info.label, font=ctk.CTkFont(size=12), text_color=s.DARK_TEXT, fg_color="transparent").pack(side="left")
 
-            def do_restore(path=info.path, w=win):
-                if cp.restore(path):
-                    self.status_var.set("Checkpoint restaurado. Reindexe para sincronizar contexto.")
-                    w.destroy()
+        def do_restore(path=info.path, w=win):
+            if cp.restore(path):
+                from ..indexing.excel_reader import index_from_path
+                fresh = index_from_path(ws.path, sheet_name=ws.sheet_name)
+                if not fresh.error:
+                    ws.df = fresh.df
+                    ws.columns = fresh.columns
+                    ws.row_count = fresh.row_count
+                    ws.indexed_rows = fresh.indexed_rows
+                    ws.truncated = fresh.truncated
+                    self._chat.add_fennec_bubble("Checkpoint restaurado e contexto sincronizado.")
+                else:
+                    self._chat.add_fennec_bubble("Checkpoint restaurado, mas falha ao reindexar. Use 'Indexar Agora' para sincronizar.")
+                self.status_var.set(self._workspace_status())
+                w.destroy()
 
             ctk.CTkButton(row, text="Restaurar", width=82, command=do_restore, **_btn_style).pack(side="right")
 

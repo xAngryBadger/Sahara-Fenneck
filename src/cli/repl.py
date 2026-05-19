@@ -219,16 +219,21 @@ Qualquer outro texto é enviado como pergunta ao agente Fennec.""")
         def _on_progress(status: str):
             print(f"\r{_DIM}{status}{_RESET}", end="", flush=True)
 
-        result = run_agent(
-            query=query,
-            workspace=self.workspace,
-            client=client,
-            settings=self.settings,
-            on_message=self._on_message,
-            on_checkpoint=self._on_checkpoint,
-            on_confirm_change=self._on_confirm_change,
-            on_progress=_on_progress,
-        )
+        try:
+            result = run_agent(
+                query=query,
+                workspace=self.workspace,
+                client=client,
+                settings=self.settings,
+                on_message=self._on_message,
+                on_checkpoint=self._on_checkpoint,
+                on_confirm_change=self._on_confirm_change,
+                on_progress=_on_progress,
+            )
+        except Exception as exc:
+            print(f"\r{' ' * 20}\r", end="")
+            print(f"{_RED}Erro: {exc}{_RESET}")
+            return
 
         print(f"\r{' ' * 20}\r", end="")
         for msg in self._messages:

@@ -122,8 +122,8 @@ def _migrate_if_plain(wrapper: dict) -> dict:
             log.info("Migrated plaintext tokens to Fernet encryption")
             return dict(json.loads(_tokens_path().read_text(encoding="utf-8")))
     except Exception as e:
-        log.error("Plaintext token migration failed: %s", e)
-    return wrapper
+        log.warning("Plaintext token migration failed: %s — tokens remain unencrypted on disk", e)
+        return wrapper
 
 
 def _load_all() -> dict[str, Any]:

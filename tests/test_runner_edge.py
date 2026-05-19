@@ -414,3 +414,45 @@ class TestAdjustHeader:
         msgs = []
         run_agent("altera o cabeçalho", ws, client=client, on_message=lambda t: msgs.append(t), max_steps=3)
         assert call_count == 2
+
+
+class TestReadOnlyNoLLM:
+    def test_read_only_no_llm_returns_local_answer(self, tmp_path):
+        xlsx = tmp_path / "nollm.xlsx"
+        pd.DataFrame({"A": [1, 2], "B": [3, 4]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="nollm.xlsx", sheet_name="Sheet",
+            columns=["A", "B"], row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"A": [1, 2], "B": [3, 4]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        client = MagicMock()
+        client.is_available.return_value = False
+        messages = []
+        result = run_agent("qual a media de A?", ws, client=client, on_message=lambda t: messages.append(t))
+        assert "LLM indispon" in result or "indispon" in result
+        assert len(messages) > 0
+
+    def test_read_only_with_llm_works(self, tmp_path):
+        xlsx = tmp_path / "withllm.xlsx"
+        pd.DataFrame({"A": [1, 2], "B": [3, 4]}).to_excel(xlsx, index=False, engine="openpyxl")
+        ws = Workspace(
+            path=str(xlsx), workbook_name="withllm.xlsx", sheet_name="Sheet",
+            columns=["A", "B"], row_count=2, indexed_rows=2,
+            df=pd.DataFrame({"A": [1, 2], "B": [3, 4]}),
+            excel_live=False, excel_book_name=None, error=None,
+        )
+        client = MagicMock()
+        client.is_available.return_value = True
+        client.generate.return_value = "A media de A e 1.5"
+        messages = []
+        run_agent("qual a media de A?", ws, client=client, on_message=lambda t: messages.append(t))
+        assert len(messages) > 0
+
+
+class TestRunnerParameterNames:
+    def test_run_agent_accepts_query_not_text(self, tmp_path):
+        import inspect
+        sig = inspect.signature(run_agent)
+        assert "query" in sig.parameters
+        assert "text" not in sig.parameters

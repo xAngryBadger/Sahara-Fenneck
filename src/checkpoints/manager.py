@@ -165,13 +165,17 @@ class CheckpointManager:
     def restore(self, checkpoint_path: str) -> bool:
         """
         Restaura a planilha atual a partir de um checkpoint (copia o arquivo
-        do checkpoint sobre o arquivo da workspace).
+        do checkpoint sobre o arquivo da workspace). Uses temp file + rename
+        for atomicity so a partial write cannot corrupt the workspace.
         """
         src = Path(checkpoint_path)
         if not src.exists() or not self.workspace_path:
             return False
         try:
-            shutil.copy2(src, self.workspace_path)
+            dst = Path(self.workspace_path)
+            tmp = dst.with_suffix(dst.suffix + ".tmp")
+            shutil.copy2(src, tmp)
+            tmp.replace(dst)
             return True
         except Exception:
             log.exception("Falha ao restaurar checkpoint")

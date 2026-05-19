@@ -104,13 +104,3 @@ def search_functions(query: str, limit: int = 6) -> list[tuple[str, str, str]]:
 
     results.sort(key=lambda x: -x[0])
     return [(name, cat, desc) for _, name, cat, desc in results[:limit]]
-
-
-def format_suggestions_text(results: list[tuple[str, str, str]]) -> str:
-    """Formata resultados de busca para exibição no chat."""
-    if not results:
-        return "Nenhuma função encontrada para essa busca."
-    lines = ["Funções sugeridas:\n"]
-    for name, cat, desc in results:
-        lines.append(f"• {name} [{cat}] — {desc}")
-    return "\n".join(lines)
